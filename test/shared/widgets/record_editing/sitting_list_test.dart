@@ -110,6 +110,27 @@ void main() {
     expect(list.current(session), ['a', 'b']);
   });
 
+  // A record not yet created has no rows stored: its list starts empty
+  // without a read, so a read that would fail cannot leave it unloaded.
+  test('loadNone starts the list empty without a read', () async {
+    final list = rows();
+    gate = Completer<List<String>>();
+    list.load(session);
+
+    list.loadNone(session);
+    expect(list.loaded(session), isEmpty);
+    expect(list.failed(session), isFalse);
+    // The read asked before answers late and is dropped.
+    gate!.complete(['a']);
+    await session.settled();
+    expect(list.loaded(session), isEmpty);
+    expect(reads, 1);
+
+    list.set(session, ['x']);
+    expect(list.current(session), ['x']);
+    expect(session.isDirty, isTrue);
+  });
+
   test("a changed list is not read again: the diver's list stays", () async {
     final list = rows();
     list.load(session);
@@ -168,6 +189,30 @@ void main() {
     expect(list.loaded(session), isNull);
   });
 
+  // A list whose write needs what the sitting keeps beside its rows, such
+  // as the writers its photos go through (issue #4527, phase 3, plan 6).
+  test('a list written with its sitting is handed the session', () async {
+    EditSession<String>? handed;
+    final list = SittingList<String, String>.withSession(
+      key: 'withSession',
+      cardId: 'card',
+      read: (record) async => stored,
+      writeIn: (session, loaded, current) async {
+        handed = session;
+        writes.add((record: session.working, loaded: loaded, current: current));
+        return true;
+      },
+    );
+    await list.load(session);
+    list.set(session, ['a']);
+
+    await session.runHeldWrites();
+
+    expect(identical(handed, session), isTrue);
+    expect(writes.single.current, ['a']);
+    expect(list.wroteChange(session), isTrue);
+  });
+
   test('set before the load does nothing', () {
     final list = rows();
     list.set(session, ['a']);
@@ -208,5 +253,77 @@ void main() {
     expect(sameIdSets(['a:1', 'b:2'], ['b:9', 'a:8'], id), isTrue);
     expect(sameIdSets(['a:1'], ['a:1', 'b:2'], id), isFalse);
     expect(sameIdSets(['a:1', 'a:2'], ['a:3', 'b:4'], id), isFalse);
+  });
+  test(
+    'changes tells when a read lands and when the diver sets the list',
+    () async {
+      final list = rows();
+      var told = 0;
+      list.changes(session).addListener(() => told++);
+
+      list.load(session);
+      expect(told, 0);
+      await session.settled();
+      expect(told, 1);
+
+      list.set(session, ['a']);
+      expect(told, 2);
+    },
+  );
+
+  test('changes tells when a read fails', () async {
+    final list = SittingList<String, String>(
+      key: 'failing',
+      cardId: 'card',
+      read: (_) async => throw StateError('no database'),
+      write: (_, _, _) async => null,
+    );
+    var told = 0;
+    list.changes(session).addListener(() => told++);
+
+    list.load(session);
+    await session.settled();
+
+    expect(list.failed(session), isTrue);
+    expect(told, 1);
+  });
+
+  test('currentOrRead waits for the read already asked and asks none of its '
+      'own', () async {
+    final list = rows();
+    gate = Completer();
+    list.load(session);
+
+    final first = list.currentOrRead(session);
+    final second = list.currentOrRead(session);
+    gate!.complete(['x']);
+
+    expect(await first, ['x']);
+    expect(await second, ['x']);
+    expect(reads, 1);
+  });
+
+  test('currentOrRead asks for a read when none was asked', () async {
+    final list = rows();
+
+    final results = await Future.wait([
+      list.currentOrRead(session),
+      list.currentOrRead(session),
+    ]);
+
+    expect(results, [
+      ['a', 'b'],
+      ['a', 'b'],
+    ]);
+    expect(reads, 1);
+  });
+
+  test('currentOrRead answers at once once read', () async {
+    final list = rows();
+    list.load(session);
+    await session.settled();
+
+    expect(await list.currentOrRead(session), ['a', 'b']);
+    expect(reads, 1);
   });
 }

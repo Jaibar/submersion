@@ -55,6 +55,19 @@ class FieldTextBinding<T, V> {
     session.addListener(resync);
   }
 
+  /// A binding of a text value: any text is the value, a blank one too (a
+  /// field stores a blank optional value as none).
+  FieldTextBinding.plain({
+    required EditSession<T> session,
+    required EditField<T, V> field,
+    required String Function(V value) format,
+  }) : this(
+         session: session,
+         field: field,
+         format: format,
+         parse: (text) => FieldValue<V>(text as V),
+       );
+
   final EditSession<T> session;
   final EditField<T, V> field;
 
@@ -119,6 +132,18 @@ class FieldTextBinding<T, V> {
     final text = format(value);
     _lastText = text;
     // The diver can be in the field when its value arrives from elsewhere.
+    controller.replaceTextKeepingCaret(text);
+  }
+
+  /// Shows the session's value as [format] gives it now, even when the text
+  /// already reads as that value: for a [format] that has started to give
+  /// another text for the same value, such as a title shown blank once it
+  /// only repeats a name that has since loaded. Not an edit.
+  void reformat() {
+    if (_disposed || _isUnreadable) return;
+    final text = format(session.valueOf(field));
+    if (text == controller.text) return;
+    _lastText = text;
     controller.replaceTextKeepingCaret(text);
   }
 

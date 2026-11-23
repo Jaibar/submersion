@@ -48,6 +48,8 @@ abstract final class ChangeLogLabels {
   static const splitDive = 'split_dive';
   static const gearTransfer = 'gear_transfer';
   static const mediaRepair = 'media_repair';
+  static const marineLifeId = 'marine_life_id';
+  static const speciesReview = 'species_review';
   static const gearFileConversion = 'gear_file_conversion';
   static const galleryBackfill = 'gallery_backfill';
   static const mediaCleanup = 'media_cleanup';
@@ -60,6 +62,11 @@ abstract final class ChangeLogLabels {
   static const removeSource = 'remove_source';
   static const removeDuplicateCylinders = 'remove_duplicate_cylinders';
   static const updatePlannedDives = 'update_planned_dives';
+
+  /// The media library's bulk actions (issue #4527).
+  static const moveMedia = 'move_media';
+  static const unlinkMedia = 'unlink_media';
+  static const removeGearPhotos = 'remove_gear_photos';
 }
 
 /// Tells the change log triggers what is happening (issue #3922).

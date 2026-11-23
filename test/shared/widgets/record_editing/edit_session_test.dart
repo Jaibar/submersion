@@ -364,6 +364,24 @@ void main() {
     expect(session.isDirty, isFalse);
   });
 
+  // A new record copied from another (a duplicate site, issue #4527)
+  // sets every field from a list of fields of mixed types.
+  test('a field copies its value from another record through its own '
+      'type', () {
+    final fields = <EditField<_Rec, Object?>>[_notes, _tags, _depth];
+    final session = EditSession(const _Rec(), isNew: true);
+    const from = _Rec(notes: 'Choppy', tags: ['night'], depth: 18);
+
+    for (final field in fields) {
+      field.copyFrom(session, from);
+    }
+
+    expect(session.working.notes, 'Choppy');
+    expect(session.working.tags, ['night']);
+    expect(session.working.depth, 18);
+    expect(session.changedCardIds, {'notes', 'tags', 'details'});
+  });
+
   // A write to another table can be the diver's change in its own right: a
   // dismissed suggestion, a location added to a site. No record value moves,
   // yet the sitting has something to save (issue #4527, plan 4).
@@ -377,6 +395,34 @@ void main() {
       expect(session.isHeld('k'), isTrue);
       expect(session.hasHeldChanges, isTrue);
       expect(session.hasHeldWrites, isTrue);
+    });
+
+    // A save that writes part of the sitting asks which cards hold one
+    // (a library reader's own, issue #4527).
+    test('name their cards, a pending value and a held write not', () {
+      final session = EditSession(const _Rec())
+        ..set(_notes, 'late')
+        ..holdWrite('w', () async {})
+        ..holdChange('k', cardId: 'header', write: () async {});
+
+      expect(session.heldChangeCardIds, {'header'});
+    });
+
+    // A save that wrote part of the sitting and then stopped keeps the
+    // rest; the part it wrote must not run again (issue #4527).
+    test('of written cards are dropped, even while frozen', () {
+      final session = EditSession(const _Rec())
+        ..holdChange('m', cardId: 'media', write: () async {})
+        ..holdChange('k', cardId: 'header', write: () async {})
+        ..freeze();
+      var told = 0;
+      session.addListener(() => told++);
+
+      session.dropWrittenChanges({'media'});
+
+      expect(session.heldChangeCardIds, {'header'});
+      expect(session.changedCardIds, {'header'});
+      expect(told, 1);
     });
 
     test('move their card, so a closed card is redrawn', () {
@@ -534,5 +580,29 @@ void main() {
     test('with none, settled completes at once', () async {
       await expectLater(EditSession(const _Rec()).settled(), completes);
     });
+  });
+
+  // A reader's Send writes only their own cards' held changes (issue #4527,
+  // phase 2).
+  test('held changes run only for the cards named', () async {
+    final ran = <String>[];
+    final session = EditSession<_Rec>(const _Rec())
+      ..holdChange('a', cardId: 'a', write: () async => ran.add('a'))
+      ..holdChange('b', cardId: 'b', write: () async => ran.add('b'));
+
+    await session.runHeldWrites(cardIds: {'a'});
+
+    expect(ran, ['a']);
+  });
+
+  test('a held write with no card does not run when cards are named', () async {
+    final ran = <String>[];
+    final session = EditSession<_Rec>(const _Rec())
+      ..holdWrite('w', () async => ran.add('w'))
+      ..holdChange('a', cardId: 'a', write: () async => ran.add('a'));
+
+    await session.runHeldWrites(cardIds: {'a'});
+
+    expect(ran, ['a']);
   });
 }

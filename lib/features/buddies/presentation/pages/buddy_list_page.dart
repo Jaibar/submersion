@@ -21,7 +21,7 @@ import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.da
 import 'package:submersion/features/buddies/presentation/widgets/buddy_list_content.dart';
 import 'package:submersion/features/buddies/presentation/widgets/buddy_summary_widget.dart';
 import 'package:submersion/features/buddies/presentation/pages/buddy_detail_page.dart';
-import 'package:submersion/features/buddies/presentation/pages/buddy_edit_page.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/features/buddies/presentation/providers/buddy_query_providers.dart';
@@ -54,7 +54,7 @@ class _BuddyListPageState extends ConsumerState<BuddyListPage>
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/buddies/new');
+          openNewBuddy(context);
         }
       },
       tooltip: context.l10n.buddies_action_addTooltip,
@@ -87,17 +87,17 @@ class _BuddyListPageState extends ConsumerState<BuddyListPage>
             },
           ),
           summaryBuilder: (context) => const BuddySummaryWidget(),
-          editBuilder: (context, buddyId, onSaved, onCancel) => BuddyEditPage(
-            buddyId: buddyId,
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
+          // The page opened unlocked (issue #4527).
+          editBuilder: (context, buddyId, onSaved, onCancel) => buddyEditPane(
+            context,
+            buddyId,
+            onSaved,
+            onCancel,
+            onDeleted: () => context.go(GoRouterState.of(context).uri.path),
           ),
-          createBuilder: (context, onSaved, onCancel) => BuddyEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new buddy (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newBuddyPane(context, onSaved, onCancel),
           selectedId: ref.watch(highlightedBuddyIdProvider),
           onEntitySelected: (id) {
             ref.read(highlightedBuddyIdProvider.notifier).state = id;
@@ -206,17 +206,17 @@ class _BuddyListPageState extends ConsumerState<BuddyListPage>
             },
           ),
           summaryBuilder: (context) => const BuddySummaryWidget(),
-          editBuilder: (context, buddyId, onSaved, onCancel) => BuddyEditPage(
-            buddyId: buddyId,
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
+          // The page opened unlocked (issue #4527).
+          editBuilder: (context, buddyId, onSaved, onCancel) => buddyEditPane(
+            context,
+            buddyId,
+            onSaved,
+            onCancel,
+            onDeleted: () => context.go(GoRouterState.of(context).uri.path),
           ),
-          createBuilder: (context, onSaved, onCancel) => BuddyEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new buddy (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newBuddyPane(context, onSaved, onCancel),
           floatingActionButton: fab,
         ),
       );

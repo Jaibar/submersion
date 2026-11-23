@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:submersion/core/database/database.dart' hide DiveSite;
@@ -7,6 +8,8 @@ import 'package:submersion/core/services/shared_library/library_edit_stamper.dar
 import 'package:submersion/core/services/sync/sync_coordinator.dart';
 import 'package:submersion/core/services/sync/sync_event_bus.dart';
 import 'package:submersion/features/change_log/data/repositories/change_log_repository.dart';
+import 'package:submersion/core/services/change_log/record_edit_label.dart';
+import 'package:submersion/features/dive_sites/data/repositories/site_feature_repository.dart';
 import 'package:submersion/features/dive_sites/data/repositories/site_repository_impl.dart';
 import 'package:submersion/features/dive_sites/data/services/site_edit_save_service.dart';
 import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
@@ -127,6 +130,127 @@ void main() {
 
   tearDown(tearDownTestDatabase);
 
+  // A new site's sitting (issue #4527, phase 2, plan 6): the row, then
+  // what the sitting held, as one History entry.
+  group('create', () {
+    const blueHole = DiveSite(
+      id: 'n1',
+      diverId: 'me',
+      name: 'Blue Hole',
+      notes: 'Deep',
+    );
+
+    Future<List<Map<String, Object?>>> events(String recordId) async {
+      await changeLog.settleAll();
+      final rows = await db
+          .customSelect(
+            'SELECT table_name, action FROM change_log_events '
+            'WHERE record_id = ?',
+            variables: [Variable<String>(recordId)],
+          )
+          .get();
+      return [for (final row in rows) row.data];
+    }
+
+    test('creates the site with its id, as one History entry', () async {
+      final created = await service.create(
+        site: blueHole,
+        changedCardIds: const ['header', 'notes'],
+      );
+
+      expect(created.id, 'n1');
+      final site = (await sites.getSiteById('n1'))!;
+      expect(site.name, 'Blue Hole');
+      expect(site.notes, 'Deep');
+      final ops = await operations();
+      expect(ops, hasLength(1));
+      expect(ops.single['source'], 'manual');
+      final label = RecordEditLabel.decode(ops.single['label']! as String)!;
+      expect(label.table, 'dive_sites');
+      expect(label.id, 'n1');
+      expect(label.cardIds.toSet(), {'header', 'notes'});
+      expect(
+        await events('n1'),
+        contains(containsPair('table_name', 'dive_sites')),
+      );
+    });
+
+    test('held writes run after the row, in the same entry', () async {
+      String? featureId;
+      await service.create(
+        site: blueHole,
+        changedCardIds: const ['features'],
+        alsoWrite: () async {
+          expect(await sites.getSiteById('n1'), isNotNull);
+          featureId = (await SiteFeatureRepository().addFeature(
+            siteId: 'n1',
+            typeName: 'mooring',
+            latitude: 1,
+            longitude: 2,
+            stampLibrary: false,
+          )).id;
+        },
+      );
+
+      expect(
+        await SiteFeatureRepository().getFeaturesForSite('n1'),
+        hasLength(1),
+      );
+      expect(await operations(), hasLength(1));
+      expect(await events(featureId!), isNotEmpty);
+    });
+
+    test('a held write that throws leaves nothing', () async {
+      await expectLater(
+        service.create(
+          site: blueHole,
+          changedCardIds: const ['features'],
+          alsoWrite: () async {
+            await SiteFeatureRepository().addFeature(
+              siteId: 'n1',
+              typeName: 'mooring',
+              latitude: 1,
+              longitude: 2,
+              stampLibrary: false,
+            );
+            throw StateError('the feature was refused');
+          },
+        ),
+        throwsStateError,
+      );
+
+      expect(await sites.getSiteById('n1'), isNull);
+      expect(await SiteFeatureRepository().getFeaturesForSite('n1'), isEmpty);
+      expect(await operations(), isEmpty);
+    });
+
+    test('an id already stored is refused', () async {
+      await service.create(site: blueHole, changedCardIds: const ['header']);
+      await expectLater(
+        service.create(
+          site: blueHole.copyWith(name: 'Other'),
+          changedCardIds: const ['header'],
+        ),
+        throwsStateError,
+      );
+
+      expect((await sites.getSiteById('n1'))!.name, 'Blue Hole');
+      expect(await operations(), hasLength(1));
+    });
+
+    test('an empty id is refused, with nothing written', () async {
+      await expectLater(
+        service.create(
+          site: blueHole.copyWith(id: ''),
+          changedCardIds: const ['header'],
+        ),
+        throwsStateError,
+      );
+
+      expect(await operations(), isEmpty);
+    });
+  });
+
   test('writes the notes as one History entry', () async {
     final result = await service.save(
       siteId: 's1',
@@ -214,6 +338,56 @@ void main() {
 
     expect((await stored()).notes, 'Calm');
     expect(heldWrites, 0);
+    expect(await operations(), isEmpty);
+  });
+
+  // A library reader's Send (plan 5): their notes and rating are their own,
+  // written as one History entry; no field of the library's site changes.
+  test(
+    'privateOnly writes a reader\'s notes and rating and nothing else',
+    () async {
+      // In a library: there the notes and rating are the reader's own.
+      await db.customStatement(
+        "UPDATE dive_sites SET shared_library_id = 'L' WHERE id = 's1'",
+      );
+      // That setup is not the sitting.
+      await changeLog.settleAll();
+      await db.customStatement('DELETE FROM change_log_operations');
+      final reader = SiteEditSaveService(sites, stamper: _MayNotEdit());
+
+      final result = await reader.save(
+        siteId: 's1',
+        apply: (site) =>
+            site.copyWith(notes: 'Choppy', rating: 4, name: 'Big Lake'),
+        changedCardIds: const ['notes', 'rating'],
+        privateOnly: true,
+      );
+
+      expect(result, isNotNull);
+      final after = await stored();
+      expect(after.notes, 'Choppy');
+      expect(after.rating, 4);
+      expect(after.name, 'Lake');
+      expect(await operations(), hasLength(1));
+    },
+  );
+
+  // Only a library site keeps notes and rating per member; elsewhere they
+  // are the site's own, and the right to edit is asked as for any field.
+  test('privateOnly on a site in no library saves nothing', () async {
+    final reader = SiteEditSaveService(sites, stamper: _MayNotEdit());
+
+    await expectLater(
+      reader.save(
+        siteId: 's1',
+        apply: notes('Choppy'),
+        changedCardIds: const ['notes'],
+        privateOnly: true,
+      ),
+      throwsA(isA<SiteEditRefused>()),
+    );
+
+    expect((await stored()).notes, 'Calm');
     expect(await operations(), isEmpty);
   });
 

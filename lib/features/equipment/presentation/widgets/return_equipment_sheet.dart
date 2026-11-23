@@ -7,15 +7,25 @@ import 'package:submersion/features/equipment/domain/entities/equipment_item.dar
 import 'package:submersion/features/equipment/domain/entities/equipment_location.dart';
 import 'package:submersion/features/equipment/domain/services/move_time.dart';
 import 'package:submersion/features/equipment/presentation/providers/equipment_location_providers.dart';
-import 'package:submersion/features/equipment/presentation/providers/equipment_providers.dart';
 import 'package:submersion/features/equipment/presentation/widgets/move_equipment_sheet.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/app_date_picker.dart';
 
-/// Takes [items] back from [buddyId]: the sheet, then the parts and status
-/// prompts, then a SnackBar. Returns how many items came back, or null when
-/// cancelled or when the return failed (a SnackBar says so).
-Future<int?> showEquipmentReturnFlow(
+/// A return asked about on a buddy's page in its sitting (issue #4527,
+/// phase 3), held until Save: the gear and the answers to the parts and
+/// status questions.
+class HeldReturn {
+  const HeldReturn({required this.items, required this.plan});
+
+  final List<EquipmentItem> items;
+  final EquipmentReturnPlan plan;
+}
+
+/// Takes [items] back from [buddyId] on the buddy's page in its sitting:
+/// the sheet, then the parts and status questions, all asked now, with
+/// nothing written. Null when the diver backs out, or when where the gear
+/// would go could not be read (a SnackBar says so).
+Future<HeldReturn?> planEquipmentReturn(
   BuildContext context,
   WidgetRef ref, {
   required List<EquipmentItem> items,
@@ -24,16 +34,12 @@ Future<int?> showEquipmentReturnFlow(
   if (items.isEmpty) return null;
   final l10n = context.l10n;
   final messenger = ScaffoldMessenger.of(context);
-  final notifier = ref.read(equipmentListNotifierProvider.notifier);
-  void failed() => messenger.showSnackBar(
-    SnackBar(content: Text(l10n.common_error_tryAgain)),
-  );
   final flow = EquipmentReturnFlow(
     moves: ref.read(equipmentLocationMoveRepositoryProvider),
     askMoveParts: (n) => askMoveParts(context, n),
     askStatus: (status, n) => askMoveStatus(context, status, n),
-    setStatus: notifier.setStatusForMany,
-    onStatusFailed: failed,
+    // Nothing is written now: the status is set at Save.
+    setStatus: (_, _) async {},
   );
   try {
     final places = await ref.read(allEquipmentLocationsByIdProvider.future);
@@ -52,22 +58,17 @@ Future<int?> showEquipmentReturnFlow(
         destinations: destinations,
       ),
     );
-    if (draft == null) return null;
-    final returned = await flow.run(
+    if (draft == null || !context.mounted) return null;
+    final plan = await flow.plan(
       items: items,
       buddyId: buddyId,
       places: places,
       movedAt: draft.movedAt,
       note: draft.note,
     );
-    messenger.showSnackBar(
-      SnackBar(content: Text(l10n.equipment_location_returned(returned))),
-    );
-    return returned;
+    return HeldReturn(items: items, plan: plan);
   } catch (_) {
-    // The flow fails only before or while the moves are written (a failed
-    // status write is reported apart), so the diver can simply try again.
-    failed();
+    messenger.showSnackBar(SnackBar(content: Text(l10n.common_error_tryAgain)));
     return null;
   }
 }

@@ -22,7 +22,7 @@ import 'package:submersion/features/dive_centers/presentation/widgets/dive_cente
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_map_content.dart';
 import 'package:submersion/features/dive_centers/presentation/widgets/dive_center_summary_widget.dart';
 import 'package:submersion/features/dive_centers/presentation/pages/dive_center_detail_page.dart';
-import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_page.dart';
+import 'package:submersion/features/dive_centers/presentation/pages/dive_center_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/features/dive_centers/presentation/providers/dive_center_query_providers.dart';
@@ -79,7 +79,7 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage>
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/dive-centers/new');
+          openNewDiveCenter(context);
         }
       },
       tooltip: context.l10n.diveCenters_tooltip_addNew,
@@ -112,18 +112,18 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage>
           },
         ),
         summaryBuilder: (context) => const DiveCenterSummaryWidget(),
+        // The page opened unlocked (issue #4527).
         editBuilder: (context, centerId, onSaved, onCancel) =>
-            DiveCenterEditPage(
-              centerId: centerId,
-              embedded: true,
-              onSaved: onSaved,
-              onCancel: onCancel,
+            diveCenterEditPane(
+              context,
+              centerId,
+              onSaved,
+              onCancel,
+              onDeleted: () => context.go(GoRouterState.of(context).uri.path),
             ),
-        createBuilder: (context, onSaved, onCancel) => DiveCenterEditPage(
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
+        // The page on a new centre (plan 11).
+        createBuilder: (context, onSaved, onCancel) =>
+            newDiveCenterPane(context, onSaved, onCancel),
         mapContent: DiveCenterMapContent(
           selectedId: ref.watch(highlightedDiveCenterIdProvider),
           onItemSelected: (centerId) {
@@ -246,18 +246,18 @@ class _DiveCenterListPageState extends ConsumerState<DiveCenterListPage>
                 onDetailsTap: (centerId) =>
                     context.push('/dive-centers/$centerId'),
               ),
+          // The page opened unlocked (issue #4527).
           editBuilder: (context, centerId, onSaved, onCancel) =>
-              DiveCenterEditPage(
-                centerId: centerId,
-                embedded: true,
-                onSaved: onSaved,
-                onCancel: onCancel,
+              diveCenterEditPane(
+                context,
+                centerId,
+                onSaved,
+                onCancel,
+                onDeleted: () => context.go(GoRouterState.of(context).uri.path),
               ),
-          createBuilder: (context, onSaved, onCancel) => DiveCenterEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new centre (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newDiveCenterPane(context, onSaved, onCancel),
           floatingActionButton: fab,
         ),
       );

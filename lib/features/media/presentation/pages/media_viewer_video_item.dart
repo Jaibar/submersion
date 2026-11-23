@@ -23,8 +23,9 @@ class _VideoItem extends ConsumerStatefulWidget {
   final bool showOverlay;
 
   /// The viewer's fullscreen mode: the centre play indicator follows the
-  /// controls' visibility, and the controls bar sits at the bottom edge
-  /// because no metadata panel is drawn under it.
+  /// controls' visibility, and this page draws the controls bar at the
+  /// bottom edge. Outside it the bar is the top row of the viewer's bottom
+  /// panel (issue #4762).
   final bool fullscreen;
   final ValueChanged<bool> onSetOverlay;
 
@@ -37,6 +38,10 @@ class _VideoItem extends ConsumerStatefulWidget {
   final void Function(String mediaId, VideoPlayerController? controller)
   onControllerChanged;
 
+  /// The viewer's sound: this page's player plays at it and follows each
+  /// change, and M toggles it (issue #4817).
+  final ViewerAudio audio;
+
   /// The viewer's people tag mode (issue #1745).
   final PeopleTagSession people;
 
@@ -44,6 +49,10 @@ class _VideoItem extends ConsumerStatefulWidget {
   /// #4675).
   final bool identificationsEditable;
   final bool hideIdentifications;
+
+  /// How far up from the bottom the viewer's panel and its scrub bar reach
+  /// outside fullscreen; the fish labels keep above it (issue #4762).
+  final double controlsInset;
 
   const _VideoItem({
     required this.item,
@@ -53,9 +62,11 @@ class _VideoItem extends ConsumerStatefulWidget {
     required this.onSetOverlay,
     required this.onHoldChanged,
     required this.onControllerChanged,
+    required this.audio,
     required this.people,
     this.identificationsEditable = true,
     this.hideIdentifications = false,
+    this.controlsInset = 0,
   });
 
   @override
@@ -93,6 +104,7 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
   @override
   void initState() {
     super.initState();
+    widget.audio.addListener(_applyAudio);
     // A neighbour built ahead holds no native player: only the page on
     // screen gets a decoder and texture, as before neighbours stayed built
     // (#1175 is the memory budget this protects).
@@ -102,6 +114,12 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
   @override
   void didUpdateWidget(covariant _VideoItem oldWidget) {
     super.didUpdateWidget(oldWidget);
+    // One sound for the viewer's whole life: the page owns it, so the
+    // listener added in initState stays on the right one.
+    assert(
+      identical(oldWidget.audio, widget.audio),
+      'a video page keeps the ViewerAudio it was built with',
+    );
     if (!oldWidget.isCurrent && widget.isCurrent) {
       _initializeVideo();
     } else if (oldWidget.isCurrent && !widget.isCurrent) {
@@ -130,8 +148,35 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
     _releaseController(controller, widget.item.id);
   }
 
+  /// Gives the live player the viewer's sound: after the sound changes, and
+  /// when a player is handed over. The opener sets it before any play; this
+  /// catches a change made while the player was still being readied.
+  void _applyAudio() {
+    final controller = _controller;
+    if (controller == null ||
+        controller.value.volume == widget.audio.effectiveVolume) {
+      return;
+    }
+    unawaited(
+      widget.audio.applyTo(controller).catchError((Object e) {
+        _log.warning('Video ${widget.item.id} volume change failed', error: e);
+      }),
+    );
+  }
+
   /// Handle keyboard events for video playback
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    // M mutes or unmutes, in tag mode too: it does not move the frame. A
+    // chord with Ctrl, Cmd or Alt is some other shortcut's to take.
+    final keyboard = HardwareKeyboard.instance;
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.keyM &&
+        !keyboard.isControlPressed &&
+        !keyboard.isMetaPressed &&
+        !keyboard.isAltPressed) {
+      widget.audio.toggleMute();
+      return KeyEventResult.handled;
+    }
     // In people tag mode the video stays on the frame its boxes are drawn
     // on (issue #1745), so Space does not play it.
     if (event is KeyDownEvent &&
@@ -169,6 +214,9 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
       final opener = VideoPlaybackOpener(
         playback,
         release: (controller) => _releaseController(controller, mediaId),
+        // Read at each open, a reopen included: never a moment of sound
+        // while the viewer is muted.
+        volume: () => widget.audio.effectiveVolume,
       );
       final controller = await opener.open();
 
@@ -185,6 +233,8 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
         _isInitialized = true;
         _isLoading = false;
       });
+      // As for a reopen: any toggle since the opener set its volume.
+      _applyAudio();
       // Ownership has moved to _controller; dispose() owns it from here.
       widget.onControllerChanged(mediaId, controller);
       opener.watch(controller, onReplaced: _onReplaced);
@@ -221,11 +271,15 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
       return;
     }
     setState(() => _controller = next);
+    // It took the viewer's sound when it opened; a toggle since, while it
+    // seeked and resumed, reached only the failed player.
+    _applyAudio();
     widget.onControllerChanged(mediaId, next);
   }
 
   @override
   void dispose() {
+    widget.audio.removeListener(_applyAudio);
     final controller = _controller;
     _opener?.dispose();
     if (controller != null) {
@@ -327,6 +381,16 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
       _focusNode.requestFocus();
     }
 
+    // Fullscreen draws its bar here, at the bottom edge; elsewhere the bar
+    // is the top row of the viewer's bottom panel (issue #4762). Not in
+    // tag mode: the video stays on the frame its boxes are drawn on.
+    final barBottom = MediaQuery.paddingOf(context).bottom + 24;
+    final showBar =
+        widget.fullscreen && widget.showOverlay && !widget.people.active;
+    final controlsInset = widget.fullscreen
+        ? (showBar ? barBottom + VideoControlsBar.height : 0.0)
+        : widget.controlsInset;
+
     return Focus(
       focusNode: _focusNode,
       onKeyEvent: _handleKeyEvent,
@@ -370,7 +434,7 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
 
           // Name pills and dots on the fish (issue #4675). Out of tag mode
           // and white-point picking, which take the taps.
-          if (marineLifeIdEnabled &&
+          if (marineLifeLabelsShown &&
               widget.isCurrent &&
               !widget.people.active &&
               !widget.hideIdentifications)
@@ -380,6 +444,23 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
                 item: widget.item,
                 sitting: widget.people.sitting,
                 editable: widget.identificationsEditable,
+                bottomInset: controlsInset,
+              ),
+            ),
+
+          // Tells the scan where the diver is watching (issue #4709), in tag
+          // mode and white-point picking too: the scan follows the playhead
+          // while the labels are hidden. Draws nothing. Keyed: the labels
+          // just before it come and go, and a reporter rebuilt then would
+          // forget what it reported.
+          if (marineLifeIdEnabled && widget.isCurrent)
+            Positioned(
+              key: const ValueKey('video_playhead_reporter'),
+              left: 0,
+              top: 0,
+              child: VideoPlayheadReporter(
+                playback: controller,
+                item: widget.item,
               ),
             ),
 
@@ -409,20 +490,16 @@ class _VideoItemState extends ConsumerState<_VideoItem> {
                     ),
             ),
 
-          // Video controls overlay (bottom). Not in tag mode: the video stays
-          // on the frame its boxes are drawn on.
-          if (widget.showOverlay && !widget.people.active)
+          // Fullscreen's controls bar, at the bottom edge.
+          if (showBar)
             Positioned(
               left: 0,
               right: 0,
-              // Above the metadata overlay and mini profile; at the edge in
-              // fullscreen, where neither is drawn.
-              bottom: widget.fullscreen
-                  ? MediaQuery.paddingOf(context).bottom + 24
-                  : 160,
+              bottom: barBottom,
               child: VideoControlsBar(
                 controller: controller,
                 mediaId: widget.item.id,
+                audio: widget.audio,
                 // The controls hide 3 s after a reveal: hold them up while
                 // scrubbing or under the mouse, so the bar is not pulled from
                 // under the pointer, then restart the clock only if the video

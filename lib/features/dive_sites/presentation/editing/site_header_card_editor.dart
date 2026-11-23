@@ -25,6 +25,7 @@ import 'package:submersion/features/dive_sites/domain/entities/dive_site.dart';
 import 'package:submersion/features/dive_sites/domain/services/site_suggestions.dart';
 import 'package:submersion/features/dive_sites/presentation/editing/site_enum_chips_row.dart';
 import 'package:submersion/features/dive_sites/presentation/editing/site_plain_fields.dart';
+import 'package:submersion/features/dive_sites/presentation/editing/site_reader_sitting.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/similar_value_hint.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
@@ -81,7 +82,7 @@ class _SiteHeaderCardEditorState extends ConsumerState<SiteHeaderCardEditor>
   @override
   Future<void> loadSitting(EditSession<DiveSite> session) => Future.wait([
     siteTypesList.load(session),
-    if (siteSharingLoaded(session) == null) loadSiteSharing(session, ref.read),
+    if (siteSharing.loaded(session) == null) loadSiteSharing(session, ref.read),
   ]);
 
   /// Holds what the diver chose for [pair]; says so when what it needed
@@ -113,10 +114,10 @@ class _SiteHeaderCardEditorState extends ConsumerState<SiteHeaderCardEditor>
   Widget? _sharingField(EditSession<DiveSite> session) {
     final stored = session.stored;
     if (stored.isLibrarySite) return null;
-    final loaded = siteSharingLoaded(session);
-    final unread = siteSharingUnread(session);
+    final loaded = siteSharing.loaded(session);
+    final unread = siteSharing.unread(session);
     if (loaded == null && !unread) return null;
-    final current = siteSharingInSitting(session) ?? ItemSharing.none;
+    final current = siteSharing.inSitting(session) ?? ItemSharing.none;
     final activeDiver = ref.watch(validatedCurrentDiverIdProvider);
     return ItemSharingField(
       kind: SharedItemKind.site,
@@ -127,7 +128,7 @@ class _SiteHeaderCardEditorState extends ConsumerState<SiteHeaderCardEditor>
           : canDestroySharedItemOnceKnown(activeDiver, ownerId: stored.diverId),
       ownerId: stored.diverId ?? activeDiver.value,
       itemName: session.working.name,
-      onChanged: (next) => setSiteSharing(
+      onChanged: (next) => siteSharing.set(
         session,
         next,
         // The profile acting now, which the repository checks.
@@ -166,6 +167,8 @@ class _SiteHeaderCardEditorState extends ConsumerState<SiteHeaderCardEditor>
           SuggestionFormRow(
             label: l10n.diveSites_edit_field_siteName_label,
             controller: _name.controller,
+            // A new site starts at its name, which it needs (plan 6).
+            autofocus: session.isNew,
             suggestions: names,
             textCapitalization: TextCapitalization.words,
             validator: (_) => siteNameIsValid(session)
@@ -225,6 +228,9 @@ class _SiteHeaderCardEditorState extends ConsumerState<SiteHeaderCardEditor>
                     child: SiteCatalogueOfferLine(
                       site: session.stored,
                       onReviewed: (pair, result) => _holdReview(pair, result),
+                      // A fill writes the library's site, which a reader's
+                      // sitting cannot (plan 5): the offer reads only.
+                      reviewable: !isReaderSitting(session),
                     ),
                   ),
           ),

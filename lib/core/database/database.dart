@@ -140,6 +140,7 @@ String legacyDataSourceId(String diveId) => '$kLegacyDataSourceIdPrefix$diveId';
     MediaRepairLog,
     MediaIdentificationRuns,
     MediaIdentifications,
+    MediaIdentificationCrops,
     MediaSmartAlbums,
     Settings,
     Buddies,
@@ -332,7 +333,7 @@ class AppDatabase extends _$AppDatabase {
 
   /// The current schema version as a static constant so that pre-open checks
   /// (e.g. version-mismatch guard) can reference it without an instance.
-  static const int currentSchemaVersion = 376;
+  static const int currentSchemaVersion = 382;
 
   /// The oldest schema whose reader can apply this build's sync payloads
   /// without loss or misinterpretation (the compatibility floor).
@@ -497,7 +498,27 @@ class AppDatabase extends _$AppDatabase {
   /// an exact 1 on every device. Peers below 350 are held until they
   /// update. Their own payloads still arrive here and decode cleanly: a
   /// missing abundance is null, an exact count.
-  static const int minimumCompatibleSchemaVersion = 350;
+  ///
+  /// Raised 350 -> 378 by the marks on a species tag the app applied
+  /// (#4727): v378 adds the synced columns media_species.unconfirmed,
+  /// created_sighting and created_species, where null is the diver's own
+  /// tag. A peer below 378 stores an app-applied tag as a plain tag. Once
+  /// that peer upgrades, the columns are null there, and its next full
+  /// publish sends them as explicit nulls, which the merge applies as real
+  /// values (only an omitted key is refilled from the local row), silently
+  /// confirming the app's tags on every device. Peers below 378 are held
+  /// until they update. Their own payloads still arrive here and decode
+  /// cleanly: a missing column is null, the diver's own tag.
+  ///
+  /// Raised 378 -> 381 by syncing marine life results (#4876): v381 gives
+  /// media_identification_runs and media_identifications their clocks and
+  /// adds media_identification_crops. A peer below 381 drops those keys and
+  /// moves its cursor past the changesets that carry them, so once it
+  /// upgraded it would never receive the results published before (nothing
+  /// triggers a full resync in normal use): the device that analysed
+  /// usually updates first. Held below the floor, it reads them all once it
+  /// updates. Its own payloads still arrive here and decode cleanly.
+  static const int minimumCompatibleSchemaVersion = 381;
 
   /// Every schema version that has a migration block in onUpgrade.
   /// Used to calculate progress step counts. When adding a new migration,
@@ -1741,13 +1762,38 @@ class AppDatabase extends _$AppDatabase {
     374,
     // v375: media_identification_runs and media_identifications, what the
     // on-device model found on each photo (issue #4668). Tables with no
-    // hlc, never synced, so the floor does not move. Renumbered from 374,
-    // which main took for #4660.
+    // hlc then, not synced until v381, so the floor did not move.
+    // Renumbered from 374, which main took for #4660.
     375,
     // v376: video columns on media_identification_runs and
-    // media_identifications (issue #4675). Columns on tables that never
-    // sync, no backfill; the floor does not move.
+    // media_identifications (issue #4675). Columns on tables not synced
+    // until v381, no backfill; the floor did not move.
     376,
+    // v377: media_identification_runs.scanned_ranges, the stretches of a
+    // video scanned (issue #4709). A column on a table not synced until
+    // v381, no backfill; the floor did not move.
+    377,
+    // v378: media_species.unconfirmed, created_sighting and created_species,
+    // the marks on a tag the app applied (issue #4727). Synced columns, no
+    // backfill; the floor rises to 378.
+    378,
+    // v379: diver_settings visibility and colour of the three Avelo profile
+    // lines (issue #4664). Additive and defaulted; the floor does not move.
+    379,
+    // v380: a lone download stamped as combined gets its source back as
+    // primary, and a live series duplicating its source's own under another
+    // computer's label is demoted (issue #4847). Data only; the floor does
+    // not move.
+    380,
+    // v381: marine life results sync (issue #4876): clocks on both
+    // identification tables, a run's maker, run id and naming bars, the
+    // decision clock, and media_identification_crops. The floor rises to
+    // 381 (see minimumCompatibleSchemaVersion).
+    381,
+    // v382: dives.hand_set_fields, the computer-written values the diver set
+    // by hand, which a re-parse and a resync keep (issue #4909). Nullable,
+    // no backfill; the floor does not move.
+    382,
   ];
 
   /// Returns the number of migration steps that will execute when upgrading

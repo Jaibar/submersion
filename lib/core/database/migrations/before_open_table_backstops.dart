@@ -163,5 +163,17 @@ extension TableBackstopsFromV217 on AppDatabase {
     // v376 backstop: the identification tables' video columns (issue
     // #4675; local, idempotent). After the tables exist.
     await _assertIdentificationVideoColumns();
+
+    // v377 backstop: the stretches of a video already scanned (issue
+    // #4709; local, idempotent).
+    await _assertIdentificationScannedRanges();
+
+    // v378 backstop: the marks on a species tag the app applied (issue
+    // #4727; synced columns, idempotent).
+    await _assertMediaSpeciesAppTagColumns();
+
+    // v381 backstop: what syncing marine life results needs (issue #4876;
+    // synced, idempotent). After the v375 to v377 backstops.
+    await _assertIdentificationSyncSchema();
   }
 }

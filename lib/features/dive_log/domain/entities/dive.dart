@@ -204,6 +204,14 @@ class Dive extends Equatable {
   /// the UDDF backup so a restored dive keeps its list.
   final bool gasSwitchesEdited;
 
+  /// The computer-written values the diver set by hand (issue #4909), as
+  /// stored in `dives.hand_set_fields`: a re-parse and a resync keep them.
+  /// Opaque here; read through `HandSetMarks`. Marked by the dive page's
+  /// Save and by bulk edit, never by saving this entity, so `updateDive`
+  /// leaves the column alone. Carried by the UDDF backup so a restored dive
+  /// keeps its marks.
+  final String? handSetFields;
+
   /// Seconds added to each photo's capture time before it is placed on this
   /// dive (issue #4539): negative for a camera running ahead of the dive
   /// computer, positive for one behind. Written on its own, by the Set-time
@@ -349,6 +357,7 @@ class Dive extends Equatable {
     this.excludedFromStats = false,
     this.excludedFromGasStats = false,
     this.gasSwitchesEdited = false,
+    this.handSetFields,
     this.mediaTimeOffsetSeconds = 0,
     this.tags = const [],
     // CCR/SCR fields (v1.5)
@@ -957,6 +966,7 @@ class Dive extends Equatable {
     bool? excludedFromStats,
     bool? excludedFromGasStats,
     bool? gasSwitchesEdited,
+    String? handSetFields,
     int? mediaTimeOffsetSeconds,
     List<Tag>? tags,
     // CCR/SCR fields
@@ -1121,6 +1131,7 @@ class Dive extends Equatable {
       excludedFromStats: excludedFromStats ?? this.excludedFromStats,
       excludedFromGasStats: excludedFromGasStats ?? this.excludedFromGasStats,
       gasSwitchesEdited: gasSwitchesEdited ?? this.gasSwitchesEdited,
+      handSetFields: handSetFields ?? this.handSetFields,
       mediaTimeOffsetSeconds:
           mediaTimeOffsetSeconds ?? this.mediaTimeOffsetSeconds,
       tags: tags ?? this.tags,
@@ -1258,6 +1269,7 @@ class Dive extends Equatable {
     excludedFromStats,
     excludedFromGasStats,
     gasSwitchesEdited,
+    handSetFields,
     mediaTimeOffsetSeconds,
     tags,
     // CCR/SCR fields
@@ -1339,6 +1351,11 @@ class DiveProfilePoint extends Equatable {
   // source carried none. Never computed by the app.
   final int? gf99; // Computer-reported GF99, percent
   final int? n2Load; // Computer-reported aggregate N2 tissue loading, percent
+  // Shearwater Avelo mode (issue #4664), as the computer logged them; null
+  // outside Avelo mode and where the computer logged no value.
+  final double? aveloBuoyancy; // kg, negative is heavy
+  final int? aveloGasRemaining; // Hydrotank gas remaining, percent
+  final double? computerRmv; // The computer's own RMV, L/min
 
   const DiveProfilePoint({
     required this.timestamp,
@@ -1370,6 +1387,9 @@ class DiveProfilePoint extends Equatable {
     this.tts,
     this.gf99,
     this.n2Load,
+    this.aveloBuoyancy,
+    this.aveloGasRemaining,
+    this.computerRmv,
   });
 
   DiveProfilePoint copyWith({
@@ -1402,6 +1422,9 @@ class DiveProfilePoint extends Equatable {
     int? tts,
     int? gf99,
     int? n2Load,
+    double? aveloBuoyancy,
+    int? aveloGasRemaining,
+    double? computerRmv,
   }) {
     return DiveProfilePoint(
       timestamp: timestamp ?? this.timestamp,
@@ -1433,6 +1456,9 @@ class DiveProfilePoint extends Equatable {
       tts: tts ?? this.tts,
       gf99: gf99 ?? this.gf99,
       n2Load: n2Load ?? this.n2Load,
+      aveloBuoyancy: aveloBuoyancy ?? this.aveloBuoyancy,
+      aveloGasRemaining: aveloGasRemaining ?? this.aveloGasRemaining,
+      computerRmv: computerRmv ?? this.computerRmv,
     );
   }
 
@@ -1467,6 +1493,9 @@ class DiveProfilePoint extends Equatable {
     tts,
     gf99,
     n2Load,
+    aveloBuoyancy,
+    aveloGasRemaining,
+    computerRmv,
   ];
 }
 

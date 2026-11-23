@@ -17,7 +17,6 @@ import 'package:submersion/features/marine_life/presentation/helpers/species_sug
 import 'package:submersion/features/marine_life/presentation/providers/species_providers.dart';
 import 'package:submersion/features/marine_life/presentation/widgets/species_sightings_section.dart';
 import 'package:submersion/features/marine_life/presentation/widgets/species_where_seen_section.dart';
-import 'package:submersion/features/media/data/services/species_tagging_service.dart';
 import 'package:submersion/features/media/presentation/pages/species_tag_picker_page.dart';
 import 'package:submersion/features/media/presentation/helpers/species_photo_import_helper.dart';
 import 'package:submersion/features/media/presentation/widgets/species_photos_section.dart';
@@ -26,115 +25,227 @@ import 'package:submersion/features/insights/domain/entities/species_insights.da
 import 'package:submersion/features/insights/presentation/providers/insights_providers.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_view.dart';
+import 'package:submersion/features/marine_life/data/services/species_edit_save_service.dart';
+import 'package:submersion/features/marine_life/presentation/editing/species_card_ids.dart';
+import 'package:submersion/features/marine_life/presentation/editing/species_edit_cards.dart';
+import 'package:submersion/features/marine_life/presentation/editing/species_new_sitting.dart';
+import 'package:submersion/features/marine_life/presentation/editing/species_photos_sitting.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/providers/species_media_providers.dart';
+import 'package:submersion/features/media_store/presentation/providers/media_store_enqueue_provider.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_header.dart';
+import 'package:submersion/shared/widgets/record_editing/add_strip.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_card.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_fade.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_frame.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
+import 'package:submersion/shared/widgets/record_editing/record_creating.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_host.dart';
+import 'package:submersion/shared/widgets/record_editing/record_open_unlocked.dart';
+import 'package:submersion/shared/widgets/record_editing/record_operation_gate.dart';
 
-class SpeciesDetailPage extends ConsumerWidget {
+part 'species_detail_page_creating.dart';
+part 'species_detail_page_editing.dart';
+
+/// A species' page. It opens locked and edits in place (issue #4527): its names
+/// and description are held in one sitting and written by one Save.
+class SpeciesDetailPage extends ConsumerStatefulWidget {
   final String speciesId;
 
-  const SpeciesDetailPage({super.key, required this.speciesId});
+  /// Opens unlocked, as the old edit address asks (`?mode=edit`).
+  final bool openUnlocked;
+
+  /// A new species (issue #4527, phase 3, plan 11): the page opened
+  /// unlocked on a species not yet created.
+  final bool newSpecies;
+
+  const SpeciesDetailPage({
+    super.key,
+    required this.speciesId,
+    this.openUnlocked = false,
+  }) : newSpecies = false;
+
+  /// A new species' page.
+  const SpeciesDetailPage.newSpecies({super.key})
+    : speciesId = '',
+      openUnlocked = false,
+      newSpecies = true;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final speciesAsync = ref.watch(speciesProvider(speciesId));
+  ConsumerState<SpeciesDetailPage> createState() => _SpeciesDetailPageState();
+}
 
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          tooltip: context.l10n.marineLife_speciesDetail_backTooltip,
-          onPressed: () => context.pop(),
-        ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit_outlined),
-            tooltip: context.l10n.marineLife_speciesDetail_editTooltip,
-            onPressed: () => context.push('/species/$speciesId/edit'),
-          ),
-          if (speciesAsync.value case final species?)
-            PopupMenuButton<String>(
-              key: const ValueKey('species_detail_menu'),
-              onSelected: (value) {
-                if (value == kOpenInConnectionsAction) {
-                  openInConnections(
-                    context,
-                    NodeRef(ConnectionKind.species, species.id),
-                  );
-                } else if (value == 'suggest') {
-                  _suggestForCatalog(context, ref, species);
-                }
-              },
-              itemBuilder: (context) => [
-                changeLogHistoryMenuItem(
-                  context,
-                  rootTable: 'species',
-                  rootId: species.id,
-                ),
-                openInConnectionsMenuItem(context),
-                // Only a custom species can be suggested: built-ins
-                // already are the catalog.
-                if (!species.isBuiltIn)
-                  PopupMenuItem(
-                    value: 'suggest',
-                    child: Text(
-                      context.l10n.marineLife_speciesDetail_suggestForCatalog,
-                    ),
-                  ),
-              ],
-            ),
-        ],
+class _SpeciesDetailPageState extends ConsumerState<SpeciesDetailPage>
+    with
+        RecordEditHost<SpeciesDetailPage, Species>,
+        RecordOpenUnlocked<SpeciesDetailPage, Species>,
+        _SpeciesDetailPageEditing,
+        RecordCreating<SpeciesDetailPage, Species>,
+        _SpeciesDetailPageCreating {
+  String get speciesId => widget.speciesId;
+
+  @override
+  void dispose() {
+    disposeEditing();
+    super.dispose();
+  }
+
+  /// Today's top bar, with the lock beside Edit when the page edits in
+  /// place and the record has been read.
+  PreferredSizeWidget _lockedBar(Species? species) => AppBar(
+    leading: IconButton(
+      icon: const Icon(Icons.arrow_back),
+      tooltip: context.l10n.marineLife_speciesDetail_backTooltip,
+      onPressed: () => context.pop(),
+    ),
+    actions: [
+      if (species != null) lockButton(species),
+      if (species != null) _menu(species),
+    ],
+  );
+
+  /// The page's menu: History, Open in Connections, Suggest for catalog,
+  /// and its whole-record operations. Shown in the locked bar and, while
+  /// unlocked, in the edit bar.
+  Widget _menu(Species species) => PopupMenuButton<String>(
+    key: const ValueKey('species_detail_menu'),
+    onSelected: (value) {
+      if (value == kOpenInConnectionsAction) {
+        openInConnections(context, NodeRef(ConnectionKind.species, species.id));
+      } else if (value == 'suggest') {
+        _suggestForCatalog(context, ref, species);
+      } else if (value == 'delete') {
+        _runSpeciesOperation(() => _deleteSpecies(species));
+      }
+    },
+    itemBuilder: (context) => [
+      changeLogHistoryMenuItem(
+        context,
+        rootTable: 'species',
+        rootId: species.id,
       ),
-      body: speciesAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, st) => Center(
-          child: Text(
-            context.l10n.marineLife_speciesDetail_errorPrefix(e.toString()),
+      openInConnectionsMenuItem(context),
+      // Only a custom species can be suggested: built-ins
+      // already are the catalog.
+      if (!species.isBuiltIn)
+        PopupMenuItem(
+          value: 'suggest',
+          child: Text(context.l10n.marineLife_speciesDetail_suggestForCatalog),
+        ),
+      // Delete, where the manage page allows it (a custom species): a
+      // whole-record operation, under the lock.
+      ..._speciesRecordMenuItems(species),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) {
+    if (isCreating) return newRecordWaiting(context) ?? _buildNewSpecies();
+    final speciesAsync = ref.watch(speciesProvider(speciesId));
+    followStored(speciesProvider(speciesId));
+    final stored = speciesAsync.value;
+    if (stored == null) {
+      return Scaffold(
+        appBar: _lockedBar(null),
+        body: speciesAsync.when(
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (e, st) => Center(
+            child: Text(
+              context.l10n.marineLife_speciesDetail_errorPrefix(e.toString()),
+            ),
+          ),
+          data: (_) => Center(
+            child: Text(context.l10n.marineLife_speciesDetail_notFound),
           ),
         ),
-        data: (species) {
-          if (species == null) {
-            return Center(
-              child: Text(context.l10n.marineLife_speciesDetail_notFound),
-            );
-          }
+      );
+    }
+    openUnlockedOnce(stored);
+    final shown = shownRecord(stored);
+    return editScaffold(
+      record: stored,
+      shown: shown,
+      lockedBar: _lockedBar(shown),
+      unlockedActions: [_menu(shown)],
+      content: _body(shown),
+    );
+  }
 
-          final description = species.localizedDescription(context.l10n);
+  /// A new species' page on its seed: its header and description, with no
+  /// menu and none of what a species not yet created cannot have (its
+  /// statistics, photos, places and sightings).
+  Widget _buildNewSpecies() {
+    final seed = newRecordSeed!;
+    final shown = shownRecord(seed);
+    return editScaffold(
+      record: seed,
+      shown: shown,
+      // Never shown: a new species' page leaves once its sitting ends.
+      lockedBar: AppBar(title: Text(newRecordTitle(context))),
+      content: _body(shown),
+    );
+  }
 
-          return SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: Column(
+  /// The page's sections for [species], framed for editing in place while
+  /// the page offers it.
+  Widget _body(Species species) {
+    final l10n = context.l10n;
+    final description = species.localizedDescription(l10n);
+    final showDescription =
+        (description != null && description.isNotEmpty) ||
+        _showsWhileEmpty(SpeciesCardId.description);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _framed(
+            SpeciesCardId.header,
+            Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildHeader(
                   context,
-                  species.localizedCommonName(context.l10n),
+                  species.localizedCommonName(l10n),
                   species.scientificName,
                   species.category,
+                  pencil: RecordCardPencil(
+                    cardTitle: SpeciesCardId.header.localizedDisplayName(l10n),
+                  ),
                 ),
                 if (species.taxonomyClass != null) ...[
                   const SizedBox(height: 8),
                   _buildTaxonomyBadge(context, species.taxonomyClass!),
                 ],
-                if (description != null && description.isNotEmpty) ...[
-                  const SizedBox(height: 16),
-                  _buildDescription(context, description),
-                ],
-                const SizedBox(height: 24),
-                _buildStatisticsSection(context, ref),
-                SpeciesPhotosSection(
-                  speciesId: speciesId,
-                  onTagPhotos: () => _openTagPicker(context),
-                  onAddPhotos: () =>
-                      SpeciesPhotoImportHelper.importPhotosForSpecies(
-                        context,
-                        ref,
-                        speciesId: speciesId,
-                      ),
-                ),
-                SpeciesWhereSeenSection(speciesId: speciesId),
-                SpeciesSightingsSection(speciesId: speciesId),
               ],
             ),
-          );
-        },
+          ),
+          if (showDescription) ...[
+            const SizedBox(height: 16),
+            _framed(
+              SpeciesCardId.description,
+              _buildDescription(
+                context,
+                description ?? '',
+                pencil: RecordCardPencil(
+                  cardTitle: SpeciesCardId.description.localizedDisplayName(
+                    l10n,
+                  ),
+                ),
+              ),
+            ),
+          ],
+          // A species not yet created has none of these (plan 11,
+          // Question 9).
+          if (!isCreating) ...[
+            const SizedBox(height: 24),
+            _calculated(_buildStatisticsSection(context, ref)),
+            _photosInSitting(),
+            _calculated(SpeciesWhereSeenSection(speciesId: speciesId)),
+            _calculated(SpeciesSightingsSection(speciesId: speciesId)),
+          ],
+        ],
       ),
     );
   }
@@ -143,8 +254,9 @@ class SpeciesDetailPage extends ConsumerWidget {
     BuildContext context,
     String commonName,
     String? scientificName,
-    SpeciesCategory category,
-  ) {
+    SpeciesCategory category, {
+    Widget? pencil,
+  }) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -177,6 +289,7 @@ class SpeciesDetailPage extends ConsumerWidget {
                 ],
               ),
             ),
+            ?pencil,
           ],
         ),
         const SizedBox(height: 8),
@@ -210,19 +323,32 @@ class SpeciesDetailPage extends ConsumerWidget {
     );
   }
 
-  Widget _buildDescription(BuildContext context, String description) {
+  Widget _buildDescription(
+    BuildContext context,
+    String description, {
+    Widget? pencil,
+  }) {
+    final title = Text(
+      context.l10n.marineLife_speciesDetail_descriptionTitle,
+      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+        color: Theme.of(context).colorScheme.primary,
+      ),
+    );
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.marineLife_speciesDetail_descriptionTitle,
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                color: Theme.of(context).colorScheme.primary,
+            if (pencil == null)
+              title
+            else
+              Row(
+                children: [
+                  Expanded(child: title),
+                  pencil,
+                ],
               ),
-            ),
             const SizedBox(height: 8),
             MarkdownNotesView(description),
           ],
@@ -476,21 +602,6 @@ class SpeciesDetailPage extends ConsumerWidget {
       context,
       uri,
       launch: ref.read(speciesSuggestionLaunchProvider),
-    );
-  }
-
-  Future<void> _openTagPicker(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final l10n = context.l10n;
-    final result = await Navigator.of(context).push<TagPhotosResult>(
-      MaterialPageRoute<TagPhotosResult>(
-        fullscreenDialog: true,
-        builder: (_) => SpeciesTagPickerPage(speciesId: speciesId),
-      ),
-    );
-    if (result == null) return;
-    messenger.showSnackBar(
-      SnackBar(content: Text(l10n.marineLife_tagPicker_tagged(result.tagged))),
     );
   }
 }

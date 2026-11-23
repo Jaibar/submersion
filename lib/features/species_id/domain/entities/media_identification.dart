@@ -2,7 +2,9 @@ import 'dart:math' as math;
 
 import 'package:equatable/equatable.dart';
 
+import 'package:submersion/features/species_id/domain/entities/naming_bars.dart';
 import 'package:submersion/features/species_id/domain/entities/pack_candidate.dart';
+import 'package:submersion/features/species_id/domain/entities/scanned_ranges.dart';
 import 'package:submersion/features/species_id/domain/entities/track_sample.dart';
 
 /// What the diver made of one of the app's identifications.
@@ -77,6 +79,7 @@ class MediaIdentification extends Equatable {
     this.claimedSpeciesId,
     this.confident = false,
     this.specific = false,
+    this.runId,
   });
 
   final String id;
@@ -124,6 +127,10 @@ class MediaIdentification extends Equatable {
   /// looks like something in particular, not a hand or open water.
   final bool specific;
 
+  /// The run that produced or last carried it (issue #4876). Undecided rows
+  /// of another run lost a sync race and are not shown.
+  final String? runId;
+
   NamedCandidate? get top => candidates.isEmpty ? null : candidates.first;
 
   int get boxShorterSide => math.min(boxPixelWidth, boxPixelHeight);
@@ -135,6 +142,23 @@ class MediaIdentification extends Equatable {
   /// lost: it has a path but no crop, embedding or candidates yet, shows
   /// no label, and is named when the scan resumes.
   bool get isPending => isTrack && bestMs == null;
+
+  /// Whether the diver dismissed it and a re-analysis they asked for
+  /// brought it back (issue #4825): undecided again, with the time of that
+  /// still on it. It is shown and offered like any undecided one, and the
+  /// app never tags it by itself: the dismissal it came from is the only
+  /// record that the diver did not want that species here.
+  bool get reopened =>
+      decision == IdentificationDecision.undecided && decidedAt != null;
+
+  /// Whether the diver said something on it: a decision, a species named
+  /// from the frame, or a dismissal since brought back ([reopened]). A
+  /// rescan carries this to the fresh track of the same animal; the app's
+  /// own guesses are found again.
+  bool get saidByDiver =>
+      decision != IdentificationDecision.undecided ||
+      claimedSpeciesId != null ||
+      reopened;
 
   int get durationMs => isTrack ? (endMs ?? startMs!) - startMs! : 0;
 
@@ -160,6 +184,7 @@ class MediaIdentification extends Equatable {
     String? Function()? claimedSpeciesId,
     bool? confident,
     bool? specific,
+    String? Function()? runId,
   }) => MediaIdentification(
     id: id ?? this.id,
     mediaId: mediaId ?? this.mediaId,
@@ -184,6 +209,7 @@ class MediaIdentification extends Equatable {
         : claimedSpeciesId(),
     confident: confident ?? this.confident,
     specific: specific ?? this.specific,
+    runId: runId == null ? this.runId : runId(),
   );
 
   @override
@@ -209,6 +235,7 @@ class MediaIdentification extends Equatable {
     claimedSpeciesId,
     confident,
     specific,
+    runId,
   ];
 }
 
@@ -226,12 +253,20 @@ class MediaIdentificationRun extends Equatable {
     required this.detectionCount,
     this.scannedMs,
     this.videoDurationMs,
+    this.scannedRanges,
+    this.analysedBy,
+    this.runId,
+    this.namingBars,
   });
 
   final String mediaId;
 
   /// The pack that analysed or last named it.
   final String packVersion;
+
+  /// The pack's detector set (`SpeciesPackManifest.detectorSetId`). A
+  /// video's detector id also names the version of the tracker that linked
+  /// its tracks (`videoRunDetectorId`), so a new tracker scans it again.
   final String detectorId;
   final String classifierId;
 
@@ -247,9 +282,32 @@ class MediaIdentificationRun extends Equatable {
   final int? scannedMs;
   final int? videoDurationMs;
 
-  /// Whether a video's scan has reached its end.
+  /// Video only (issue #4709): the stretches scanned, in any order the
+  /// diver watched them. Null for a photo and for a run stored before they
+  /// were kept; [scanned] then reads [scannedMs] as one stretch from 0.
+  final ScannedRanges? scannedRanges;
+
+  /// The sync device id of the device that analysed or last renamed it
+  /// (issue #4876). Null only for a run from before v381 not yet published.
+  final String? analysedBy;
+
+  /// Minted when an analysis starts; kept by later chunks and renames.
+  final String? runId;
+
+  /// The naming bars of the pack that named it, or null when unknown.
+  final NamingBars? namingBars;
+
+  /// Whether it was made on the device whose sync id is [deviceId]. A run
+  /// from before v381 was made on the device holding it.
+  bool madeOn(String deviceId) => analysedBy == null || analysedBy == deviceId;
+
+  /// The stretches of the video scanned so far.
+  ScannedRanges get scanned =>
+      scannedRanges ?? ScannedRanges.prefix(scannedMs ?? 0);
+
+  /// Whether a video's scan has covered all of it.
   bool get scanComplete =>
-      videoDurationMs != null && (scannedMs ?? 0) >= videoDurationMs!;
+      videoDurationMs != null && scanned.isComplete(videoDurationMs!);
 
   MediaIdentificationRun copyWith({
     String? packVersion,
@@ -258,6 +316,10 @@ class MediaIdentificationRun extends Equatable {
     int? detectionCount,
     int? Function()? scannedMs,
     int? Function()? videoDurationMs,
+    ScannedRanges? Function()? scannedRanges,
+    String? Function()? analysedBy,
+    String? Function()? runId,
+    NamingBars? Function()? namingBars,
   }) => MediaIdentificationRun(
     mediaId: mediaId,
     packVersion: packVersion ?? this.packVersion,
@@ -272,6 +334,10 @@ class MediaIdentificationRun extends Equatable {
     videoDurationMs: videoDurationMs == null
         ? this.videoDurationMs
         : videoDurationMs(),
+    scannedRanges: scannedRanges == null ? this.scannedRanges : scannedRanges(),
+    analysedBy: analysedBy == null ? this.analysedBy : analysedBy(),
+    runId: runId == null ? this.runId : runId(),
+    namingBars: namingBars == null ? this.namingBars : namingBars(),
   );
 
   @override
@@ -287,6 +353,10 @@ class MediaIdentificationRun extends Equatable {
     detectionCount,
     scannedMs,
     videoDurationMs,
+    scannedRanges,
+    analysedBy,
+    runId,
+    namingBars,
   ];
 }
 

@@ -19,13 +19,20 @@ void main() {
   /// Editors of a Markdown field, each with the token proving it uses the
   /// shared editor: the editor itself, or a form row in Markdown mode.
   const editors = <String, String>{
-    'lib/features/buddies/presentation/pages/buddy_edit_page.dart':
+    // A buddy's Notes card edited in place (issue #4527).
+    'lib/features/buddies/presentation/editing/buddy_edit_cards.dart':
         'MarkdownNotesField(',
-    'lib/features/certifications/presentation/pages/certification_edit_page.dart':
+    // The merge of two or more buddies (issue #4527).
+    'lib/features/buddies/presentation/pages/buddy_merge_page_fields.dart':
         'MarkdownNotesField(',
-    'lib/features/courses/presentation/pages/course_edit_page.dart':
+    // A certification's Notes card edited in place (issue #4527).
+    'lib/features/certifications/presentation/editing/certification_card_editors.dart':
         'MarkdownNotesField(',
-    'lib/features/dive_centers/presentation/pages/dive_center_edit_page.dart':
+    // A course's Notes card edited in place (issue #4527).
+    'lib/features/courses/presentation/editing/course_card_editors.dart':
+        'MarkdownNotesField(',
+    // A dive centre's Notes card edited in place (issue #4527).
+    'lib/features/dive_centers/presentation/editing/dive_center_edit_cards.dart':
         'MarkdownNotesField(',
     // The bulk notes field.
     'lib/features/dive_log/presentation/pages/bulk_dive_edit_page_form.dart':
@@ -36,6 +43,9 @@ void main() {
     // The save-as-set description, shared by the dive form and the
     // Equipment card (issue #4527).
     'lib/features/dive_log/presentation/widgets/save_gear_as_set_dialog.dart':
+        'MarkdownNotesField(',
+    // A trip's Notes card and a day's note edited in place (issue #4527).
+    'lib/features/trips/presentation/editing/trip_overview_card_editors.dart':
         'MarkdownNotesField(',
     // A site's Description and Notes cards edited in place (issue #4527).
     'lib/features/dive_sites/presentation/editing/site_markdown_card_editor.dart':
@@ -49,15 +59,17 @@ void main() {
         'markdown: true',
     'lib/features/dive_sites/presentation/widgets/edit_sections/life_notes_section.dart':
         'markdown: true',
-    'lib/features/documents/presentation/pages/document_edit_page.dart':
+    'lib/features/documents/presentation/editing/document_details_card_editor.dart':
         'MarkdownNotesField(',
-    'lib/features/equipment/presentation/pages/equipment_edit_page.dart':
+    // A gear item's Notes card edited in place (issue #4527).
+    'lib/features/equipment/presentation/editing/gear_item_edit_cards.dart':
         'MarkdownNotesField(',
-    'lib/features/equipment/presentation/pages/equipment_set_edit_page.dart':
+    // An equipment set's description edited in place (issue #4527).
+    'lib/features/equipment/presentation/editing/equipment_set_card_editors.dart':
         'MarkdownNotesField(',
     'lib/features/equipment/presentation/widgets/equipment_location_edit_dialog.dart':
         'MarkdownNotesField(',
-    'lib/features/marine_life/presentation/pages/species_edit_page.dart':
+    'lib/features/marine_life/presentation/editing/species_edit_cards.dart':
         'MarkdownNotesField(',
     'lib/features/rules/presentation/widgets/rule_action_editor.dart':
         'MarkdownNotesField(',
@@ -68,8 +80,6 @@ void main() {
     'lib/features/shared_library/presentation/widgets/library_about_section.dart':
         'MarkdownNotesField(',
     'lib/features/site_scape/presentation/site_feature_sheet.dart':
-        'MarkdownNotesField(',
-    'lib/features/trips/presentation/pages/trip_edit_page.dart':
         'MarkdownNotesField(',
     'lib/features/trips/presentation/widgets/itinerary_day_edit_sheet.dart':
         'MarkdownNotesField(',
@@ -87,14 +97,14 @@ void main() {
   const views = <String>[
     'lib/features/buddies/presentation/pages/buddy_detail_page.dart',
     'lib/features/certifications/presentation/pages/certification_detail_page.dart',
-    'lib/features/courses/presentation/pages/course_detail_page.dart',
+    'lib/features/courses/presentation/pages/course_detail_page_sections.dart',
     'lib/features/dive_centers/presentation/pages/dive_center_detail_page.dart',
     'lib/features/dive_log/presentation/widgets/dive_detail/dive_detail_text_sections.dart',
     'lib/features/dive_sites/presentation/pages/site_detail_page.dart',
     'lib/features/documents/presentation/widgets/document_details_panel.dart',
-    'lib/features/equipment/presentation/pages/equipment_detail_page.dart',
+    'lib/features/equipment/presentation/pages/equipment_detail_page_sections.dart',
     'lib/features/equipment/presentation/pages/equipment_location_detail_page.dart',
-    'lib/features/equipment/presentation/pages/equipment_set_detail_page.dart',
+    'lib/features/equipment/presentation/pages/equipment_set_detail_page_sections.dart',
     'lib/features/marine_life/presentation/pages/species_detail_page.dart',
     'lib/features/safety/presentation/pages/emergency_card_page.dart',
     'lib/features/shared_library/presentation/pages/connect_shared_library_page.dart',

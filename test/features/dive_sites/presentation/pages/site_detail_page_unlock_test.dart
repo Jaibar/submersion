@@ -2,11 +2,25 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:submersion/features/rules/data/services/rule_engine.dart';
+import 'package:submersion/features/rules/domain/entities/rule_run.dart';
+import 'package:submersion/features/rules/presentation/providers/rule_providers.dart';
+import 'package:submersion/features/media/data/services/photo_edit_save_service.dart';
+import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
+import 'package:submersion/features/media/presentation/providers/site_media_providers.dart';
+import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
+import 'package:submersion/features/media/presentation/providers/photo_editing_providers.dart';
+import 'package:submersion/features/media/presentation/providers/media_bytes_providers.dart';
+import 'package:submersion/features/media/presentation/pages/document_viewer_page.dart';
+import 'package:submersion/features/media/domain/entities/photo_record.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/data/services/asset_resolution_service.dart';
 
 import 'package:submersion/core/app/app_exit_guard.dart';
 import 'package:submersion/core/constants/dive_detail_layout.dart';
 import 'package:submersion/core/constants/site_detail_sections.dart';
 import 'package:submersion/core/services/shared_library/shared_library_models.dart';
+import 'package:submersion/features/dive_sites/presentation/widgets/site_detail_header.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_editing_page_provider.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/shared_library/presentation/providers/shared_library_providers.dart';
@@ -14,13 +28,25 @@ import 'package:submersion/l10n/arb/app_localizations_en.dart';
 import 'package:submersion/shared/widgets/record_editing/add_strip.dart';
 import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_bar.dart';
+import 'package:submersion/features/dive_sites/presentation/providers/site_providers.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_shortcuts.dart';
 import 'package:submersion/shared/widgets/record_editing/record_fold_pencil.dart';
 
 import 'site_detail_page_unlock_harness.dart';
 
-/// A site's page unlocks to edit Description and Notes in place, behind
-/// the switch (issue #4527, phase 2, plan 1).
+/// Records each run of the rules.
+class _RecordingRules extends Fake implements RuleEngine {
+  final requests = <RuleRunRequest>[];
+
+  @override
+  Future<RuleRunResult> run(RuleRunRequest request) async {
+    requests.add(request);
+    throw StateError('no rules here');
+  }
+}
+
+/// A site's page unlocks to edit Description and Notes in place (issue
+/// #4527, phase 2, plan 1).
 void main() {
   final l = AppLocalizationsEn();
 
@@ -50,17 +76,6 @@ void main() {
       s.id == SiteDetailSectionId.notes ? s.copyWith(visible: false) : s,
   ];
 
-  testWidgets('with the switch off there is no lock', (tester) async {
-    final page = await pumpSitePage(tester, unlockEditing: false);
-
-    expect(find.byIcon(Icons.lock_outline), findsNothing);
-    expect(find.byTooltip(l.diveSites_detail_editTooltip), findsOneWidget);
-    expect(
-      page.container.read(recordEditShortcutTargetsProvider).current,
-      isNull,
-    );
-  });
-
   // A file dropped on the window finds the page: locked, it has no
   // sitting; unlocked, the sitting a drop is held in (issue #4527).
   testWidgets('the page tells a drop whether the site is unlocked', (
@@ -79,9 +94,120 @@ void main() {
     expect(told()?.session, isNull);
   });
 
-  testWidgets('with the switch off a drop finds no page', (tester) async {
-    final page = await pumpSitePage(tester, unlockEditing: false);
-    expect(page.container.read(siteEditingPageProvider), isNull);
+  // The old edit address opens the page unlocked (issue #4527, phase 2).
+  group('opened unlocked', () {
+    testWidgets('with mode=edit the page is unlocked, and its end is told', (
+      tester,
+    ) async {
+      var ended = 0;
+      await pumpSitePage(
+        tester,
+        openUnlocked: true,
+        onSittingEnded: () => ended++,
+      );
+      expect(find.byType(RecordEditBar), findsOneWidget);
+
+      await tester.tap(find.text(l.forms_cancel));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(RecordEditBar), findsNothing);
+      expect(ended, 1);
+    });
+
+    // On a desktop window a root visit moves into the list pane: an edit
+    // address arrives there still asking for edit mode, once.
+    testWidgets('on desktop, mode=edit moves into the pane still asking to '
+        'unlock', (tester) async {
+      final page = await pumpSitePage(
+        tester,
+        openUnlocked: true,
+        size: const Size(1400, 1000),
+        initialLocation: '/root-site',
+      );
+
+      final landed = page.router!.routerDelegate.currentConfiguration.uri;
+      expect(landed.path, '/sites');
+      expect(landed.queryParameters['selected'], 's1');
+      expect(landed.queryParameters['mode'], 'edit');
+    });
+  });
+
+  // A window widened during a sitting keeps the page, and the sitting,
+  // until it ends: the move into the pane would drop what is being edited.
+  testWidgets('a window widened during a sitting moves into the pane only '
+      'once it ends', (tester) async {
+    final page = await pumpSitePage(tester, initialLocation: '/root-site');
+    await unlock(tester);
+    await openNotes(tester);
+    await typeNotes(tester, 'Choppy');
+
+    tester.view.physicalSize = const Size(1400, 1000);
+    addTearDown(tester.view.reset);
+    await tester.pumpAndSettle();
+
+    final router = page.router!.routerDelegate;
+    expect(router.currentConfiguration.uri.path, '/root-site');
+    expect(find.text('Choppy'), findsOneWidget);
+
+    await save(tester);
+
+    expect(page.save.calls, hasLength(1));
+    final landed = router.currentConfiguration.uri;
+    expect(landed.path, '/sites');
+    expect(landed.queryParameters['selected'], 's1');
+    expect(landed.queryParameters.containsKey('mode'), isFalse);
+  });
+
+  // An edit link on a site this profile only reads opens the reader's
+  // sitting (plan 5): suggesting, never editing, and not withdrawn.
+  testWidgets('a reader asked to open unlocked opens a reader\'s sitting', (
+    tester,
+  ) async {
+    await pumpSitePage(
+      tester,
+      openUnlocked: true,
+      site: harnessSite.copyWith(sharedLibraryId: 'L'),
+      extra: [
+        libraryRoleProvider(
+          'L',
+        ).overrideWith((ref) async => SharedLibraryRole.reader),
+        libraryConnectedHereProvider('L').overrideWith((ref) async => true),
+        siteLibraryStateProvider('s1').overrideWith((ref) async => null),
+        libraryMemberNamesProvider('L').overrideWith((ref) async => const {}),
+      ],
+    );
+
+    expect(find.byType(RecordEditBar), findsOneWidget);
+    expect(find.text(l.sharedLibrary_suggest_send), findsOneWidget);
+    expect(find.text(l.diveSites_edit_editingWithdrawn), findsNothing);
+  });
+
+  // History beside the lock where the bar has room, else in the menu, as
+  // on a dive (issue #4527).
+  group('History', () {
+    final inBar = find.descendant(
+      of: find.byType(AppBar),
+      matching: find.byTooltip(l.changeLog_history),
+    );
+
+    testWidgets('sits beside the lock on a wide window', (tester) async {
+      await pumpSitePage(tester, size: const Size(900, 1400));
+      expect(inBar, findsOneWidget);
+    });
+
+    testWidgets('is in the menu on a narrow window', (tester) async {
+      await pumpSitePage(tester, size: const Size(400, 1400));
+      expect(inBar, findsNothing);
+
+      await tester.tap(
+        find.descendant(
+          of: find.byType(AppBar),
+          matching: find.byType(PopupMenuButton<String>),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(l.changeLog_history), findsOneWidget);
+    });
   });
 
   testWidgets('locked shows no pencil', (tester) async {
@@ -114,21 +240,84 @@ void main() {
     }
   });
 
-  testWidgets('the old edit form cannot be opened over an open sitting', (
-    tester,
-  ) async {
-    // The app bar's button to the form, not a card's pencil.
-    final oldEdit = find.descendant(
-      of: find.byType(AppBar),
-      matching: find.widgetWithIcon(IconButton, Icons.edit),
-    );
-    await pumpSitePage(tester);
-    expect(oldEdit, findsOneWidget);
-
+  // Unlocked at the top of a page taller than the screen, the Add strip
+  // pushes the page down rather than lie over the header card, whose
+  // pencil sits in its first row (issue #4756).
+  testWidgets('unlocked at the top, the Add strip leaves the header pencil '
+      'in view', (tester) async {
+    await pumpSitePage(tester, size: const Size(600, 300));
+    // The page scrolls: one that fits was always pushed down.
+    // The page's own scroll view, not a sideways one such as the strip's.
+    final page = tester
+        .state<ScrollableState>(
+          find
+              .byWidgetPredicate(
+                (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+              )
+              .first,
+        )
+        .position;
+    expect(page.maxScrollExtent, greaterThan(0));
     await unlock(tester);
 
-    // The form would save over the sitting: not offered while it is open.
-    expect(oldEdit, findsNothing);
+    final strip = tester.getRect(find.byType(AddStrip));
+    expect(strip.height, greaterThan(0));
+    final pencil = tester.getRect(
+      find.byTooltip(
+        l.recordEdit_editCardTooltip(l.diveSites_detail_section_header),
+      ),
+    );
+    expect(page.pixels, page.minScrollExtent);
+    expect(
+      tester.getTopLeft(find.byType(SiteDetailHeader)).dy,
+      greaterThanOrEqualTo(strip.bottom),
+    );
+    expect(pencil.top, greaterThanOrEqualTo(strip.bottom));
+  });
+
+  // The lock is the one way in (issue #4527, phase 2, plan 7): no Edit
+  // pencil beside it on the bar.
+  testWidgets('the locked bar has the lock and no Edit pencil', (tester) async {
+    await pumpSitePage(tester);
+
+    final bar = find.byType(AppBar);
+    expect(
+      find.descendant(of: bar, matching: find.byIcon(Icons.lock_outline)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: bar,
+        matching: find.widgetWithIcon(IconButton, Icons.edit),
+      ),
+      findsNothing,
+    );
+  });
+
+  // Review Focus 1: an old edit address, bookmarked before the site was
+  // deleted, finds the page's not-found state, with no sitting to open.
+  testWidgets('an old edit address for a deleted site shows not found, '
+      'locked', (tester) async {
+    await pumpSitePage(
+      tester,
+      initialLocation: '/sites/gone/edit',
+      extra: [siteProvider('gone').overrideWith((_) async => null)],
+    );
+
+    expect(find.text(l.diveSites_detail_siteNotFound_title), findsOneWidget);
+    expect(find.byType(RecordEditBar), findsNothing);
+    expect(find.byIcon(Icons.lock_outline), findsNothing);
+  });
+
+  // The old edit address opens the stored site unlocked.
+  testWidgets('an old edit address opens the site unlocked', (tester) async {
+    final page = await pumpSitePage(tester, initialLocation: '/sites/s1/edit');
+
+    expect(find.byType(RecordEditBar), findsOneWidget);
+    expect(
+      page.router!.routerDelegate.currentConfiguration.uri.toString(),
+      '/sites/s1?mode=edit',
+    );
   });
 
   testWidgets('editing Notes and saving writes one sitting and locks', (
@@ -149,6 +338,140 @@ void main() {
     expect(find.byType(RecordEditBar), findsNothing);
     expect(find.text('Choppy'), findsOneWidget);
   });
+
+  // A site's logbook rules run once, when it is created (#3513); saving a
+  // stored site runs none (the form's case, plan 7).
+  testWidgets('saving a stored site runs no rules', (tester) async {
+    final rules = _RecordingRules();
+    final page = await pumpSitePage(
+      tester,
+      extra: [ruleEngineProvider.overrideWithValue(rules)],
+    );
+    await unlock(tester);
+    await openNotes(tester);
+    await typeNotes(tester, 'Choppy');
+
+    await save(tester);
+
+    expect(page.save.calls, hasLength(1));
+    expect(rules.requests, isEmpty);
+  });
+
+  // Review Focus 2 of plan 4b: an attachment's lock is its own, so a PDF
+  // opened from the site being edited, and closed, leaves the site's
+  // sitting as it was (issue #4527, phase 2).
+  testWidgets('opening a PDF from the site being edited keeps its sitting', (
+    tester,
+  ) async {
+    final at = DateTime.utc(2026);
+    final pdf = MediaItem(
+      id: 'p1',
+      siteId: 's1',
+      mediaType: MediaType.document,
+      originalFilename: 'reef-map.pdf',
+      takenAt: at,
+      createdAt: at,
+      updatedAt: at,
+    );
+    await pumpSitePage(
+      tester,
+      extra: [
+        mediaForSiteProvider('s1').overrideWith((_) async => [pdf]),
+        mediaBytesProvider(pdf).overrideWith(
+          (_) async =>
+              const ResolvedAssetResult(status: ResolutionStatus.unavailable),
+        ),
+        photoRecordProvider('p1').overrideWith(
+          (_) async =>
+              PhotoRecord(item: pdf, species: const [], people: const []),
+        ),
+      ],
+    );
+    await unlock(tester);
+    await openNotes(tester);
+    await typeNotes(tester, 'Choppy');
+
+    await tester.ensureVisible(find.byType(MediaThumbnailTile));
+    await tester.tap(find.byType(MediaThumbnailTile));
+    await tester.pumpAndSettle();
+    final viewer = tester.widget<DocumentViewerPage>(
+      find.byType(DocumentViewerPage),
+    );
+    expect(viewer.editableSiteId, isNotNull);
+
+    await tester.tap(find.byType(CloseButton));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DocumentViewerPage), findsNothing);
+    expect(find.byType(RecordEditBar), findsOneWidget);
+    expect(find.text('Choppy'), findsWidgets);
+  });
+
+  // The attachment's own Save, made while the site is being edited, writes
+  // the attachment alone: the site's sitting carries on.
+  testWidgets(
+    'saving the details of a PDF from the site being edited keeps its '
+    'sitting',
+    (tester) async {
+      final at = DateTime.utc(2026);
+      final pdf = MediaItem(
+        id: 'p1',
+        siteId: 's1',
+        mediaType: MediaType.document,
+        originalFilename: 'reef-map.pdf',
+        takenAt: at,
+        createdAt: at,
+        updatedAt: at,
+      );
+      final saves = <Iterable<String>>[];
+      final page = await pumpSitePage(
+        tester,
+        extra: [
+          mediaForSiteProvider('s1').overrideWith((_) async => [pdf]),
+          mediaBytesProvider(pdf).overrideWith(
+            (_) async =>
+                const ResolvedAssetResult(status: ResolutionStatus.unavailable),
+          ),
+          photoRecordProvider('p1').overrideWith(
+            (_) async =>
+                PhotoRecord(item: pdf, species: const [], people: const []),
+          ),
+          photoEditSaveServiceProvider.overrideWithValue(
+            _RecordingPhotoSave(saves),
+          ),
+        ],
+      );
+      await unlock(tester);
+      await openNotes(tester);
+      await typeNotes(tester, 'Choppy');
+      await tester.ensureVisible(find.byType(MediaThumbnailTile));
+      await tester.tap(find.byType(MediaThumbnailTile));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('document_unlock')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Edit details'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Uncategorized').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Site map').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      // The viewer's Save, in its own bar, over the site's.
+      await tester.tap(find.text(l.forms_save).last);
+      await tester.pumpAndSettle();
+      // The attachment's own save, refused if it has left the site since.
+      expect(saves.single, ['details', 'site:s1']);
+
+      await tester.tap(find.byType(CloseButton));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(RecordEditBar), findsOneWidget);
+      expect(find.text('Choppy'), findsWidgets);
+      expect(page.save.calls, isEmpty);
+    },
+  );
 
   testWidgets('a failed save stays unlocked and says so', (tester) async {
     final page = await pumpSitePage(tester);
@@ -253,15 +576,16 @@ void main() {
     },
   );
 
-  testWidgets('the pane offers no lock yet', (tester) async {
+  testWidgets('the pane offers the lock', (tester) async {
     await pumpSitePage(tester, embedded: true);
 
-    expect(find.byIcon(Icons.lock_outline), findsNothing);
+    expect(find.byIcon(Icons.lock_outline), findsOneWidget);
   });
 
-  testWidgets('a library site this profile only reads offers no lock', (
-    tester,
-  ) async {
+  // A reader's is "Suggest changes" (plan 5), and the editing keys act on
+  // it as on an editor's.
+  testWidgets('a library site this profile only reads offers the reader\'s '
+      'unlock, not the lock', (tester) async {
     final page = await pumpSitePage(
       tester,
       site: harnessSite.copyWith(sharedLibraryId: 'L'),
@@ -276,10 +600,10 @@ void main() {
     );
 
     expect(find.byIcon(Icons.lock_outline), findsNothing);
-    // Nor do the editing keys act on it.
+    expect(find.byKey(const ValueKey('site_suggest_unlock')), findsOneWidget);
     expect(
       page.container.read(recordEditShortcutTargetsProvider).current,
-      isNull,
+      isNotNull,
     );
   });
 
@@ -359,4 +683,26 @@ void main() {
     expect(find.text(l.forms_discard_title), findsNothing);
     expect(await leaving, isTrue);
   });
+}
+
+/// Records each attachment save's changed cards, and writes nothing.
+class _RecordingPhotoSave extends Fake implements PhotoEditSaveService {
+  _RecordingPhotoSave(this.saves);
+
+  final List<Iterable<String>> saves;
+
+  @override
+  Future<({PhotoRecord before, PhotoRecord after})?> save({
+    required String mediaId,
+    required String? diverId,
+    required PhotoRecord Function(PhotoRecord stored) apply,
+    required Iterable<String> changedCardIds,
+    Future<void> Function()? alsoWrite,
+    bool alsoWriteIsAChange = false,
+    ({String? id})? diveAtStart,
+    String? siteAtStart,
+  }) async {
+    saves.add([...changedCardIds, 'site:$siteAtStart']);
+    return null;
+  }
 }

@@ -68,12 +68,17 @@ void main() {
     // field returns null for "5.5" and the caller carries on, which is how
     // the planner stop minimum and trip counts dropped typos (#1900 review).
     const coordinateFiles = <String, String>{
-      'lib/features/dive_sites/presentation/pages/site_edit_page.dart':
+      // The merge page's coordinates (issue #4527, phase 2, plan 7).
+      'lib/features/dive_sites/presentation/pages/site_merge_page_fields.dart':
           'latitude/longitude, validated by the coordinate fields',
-      'lib/features/dive_centers/presentation/pages/dive_center_edit_page.dart':
+      'lib/features/dive_sites/presentation/pages/site_merge_page_location.dart':
           'latitude/longitude, validated by the coordinate fields',
       // A site's Location card edited in place (issue #4527).
       'lib/features/dive_sites/presentation/editing/site_coordinate_rows.dart':
+          'latitude/longitude, validated by the coordinate fields',
+      // A dive centre's Map card edited in place (issue #4527); unreadable
+      // text keeps the stored place and the card names the bad coordinate.
+      'lib/features/dive_centers/presentation/editing/dive_center_map_card_editor.dart':
           'latitude/longitude, validated by the coordinate fields',
       'lib/shared/widgets/forms/coordinate_field_group.dart':
           'the coordinate field group itself',

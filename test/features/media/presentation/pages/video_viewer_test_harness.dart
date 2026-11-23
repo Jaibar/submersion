@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/misc.dart' show Override;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:submersion/core/providers/provider.dart';
@@ -86,8 +87,15 @@ class FakeVideoPlatform extends VideoPlayerPlatform {
   @override
   Future<void> pause(int playerId) async => playing = false;
 
+  /// Every volume a player was given, oldest first.
+  final List<double> volumes = [];
+
+  /// The volume the player was last given, or null when none was.
+  double? get volume => volumes.isEmpty ? null : volumes.last;
+
   @override
-  Future<void> setVolume(int playerId, double volume) async {}
+  Future<void> setVolume(int playerId, double volume) async =>
+      volumes.add(volume);
 
   @override
   Future<void> setPlaybackSpeed(int playerId, double speed) async {}
@@ -160,14 +168,19 @@ MediaItem video(String id) => MediaItem(
   updatedAt: DateTime.utc(2026, 7, 1),
 );
 
-/// Opens the viewer on one clip ('v1') played by a fresh [FakeVideoPlatform],
-/// initialized and ready, and returns the platform.
+/// Opens the viewer on one clip ('v1'), or on [mediaList] at 'v1', played by
+/// a fresh [FakeVideoPlatform], initialized and ready, and returns the
+/// platform ([platform] when given). [overrides] go on top of the harness's
+/// own.
 Future<FakeVideoPlatform> pumpVideoViewer(
   WidgetTester tester,
-  SharedPreferences prefs,
-) async {
-  final platform = FakeVideoPlatform();
-  useVideoPlatform(platform);
+  SharedPreferences prefs, {
+  List<Override> overrides = const [],
+  List<MediaItem>? mediaList,
+  FakeVideoPlatform? platform,
+}) async {
+  final player = platform ?? FakeVideoPlatform();
+  useVideoPlatform(player);
   await tester.runAsync(() async {
     await tester.pumpWidget(
       ProviderScope(
@@ -181,21 +194,25 @@ Future<FakeVideoPlatform> pumpVideoViewer(
           resolvedFilePathProvider.overrideWith(
             (ref, MediaItem arg) async => tempVideoPath('v1'),
           ),
+          ...overrides,
         ],
         child: MaterialApp(
           locale: const Locale('en'),
           localizationsDelegates: AppLocalizations.localizationsDelegates,
           supportedLocales: AppLocalizations.supportedLocales,
-          home: MediaViewerPage(mediaList: [video('v1')], initialMediaId: 'v1'),
+          home: MediaViewerPage(
+            mediaList: mediaList ?? [video('v1')],
+            initialMediaId: 'v1',
+          ),
         ),
       ),
     );
     await Future<void>.delayed(const Duration(milliseconds: 50));
-    platform.completeInitialization();
+    player.completeInitialization();
     await Future<void>.delayed(const Duration(milliseconds: 150));
     await tester.pump();
     await Future<void>.delayed(const Duration(milliseconds: 50));
     await tester.pump();
   });
-  return platform;
+  return player;
 }

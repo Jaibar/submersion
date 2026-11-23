@@ -574,7 +574,7 @@ jobs:
             test/features/insights/data/dive_filter_sql_test.dart
             test/features/trips/domain/entities/trip_test.dart
             test/features/trips/domain/entities/itinerary_day_test.dart
-            test/features/trips/presentation/pages/trip_edit_page_test.dart
+            test/features/trips/presentation/editing/trip_new_sitting_test.dart
             test/features/trips/presentation/widgets/trip_summary_widget_test.dart
             test/features/trips/presentation/widgets/story/trip_story_hero_test.dart
             test/features/trips/domain/entities/trip_upcoming_test.dart
@@ -603,6 +603,68 @@ jobs:
             TZ="$zone" flutter test "${files[@]}"
             echo "::endgroup::"
           done
+
+  # The marine life vision package on its own (piece 3, ONNX Runtime): its
+  # tests load the real ONNX Runtime library that the package's build hook
+  # ships for Linux, so a broken binding, a hash that no longer matches or a
+  # missing library fails here. On Linux the real-runtime test never skips.
+  vision-package-tests:
+    name: Vision Package Tests
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read Flutter version
+        id: flutter-ver
+        run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-flutter
+        id: setup-flutter
+        with:
+          flutter-version: ${{ steps.flutter-ver.outputs.version }}
+          channel: 'stable'
+
+      - name: Run the vision package's tests
+        working-directory: packages/submersion_vision
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter test
+
+  # The same package tests on Windows, where the build hook ships Windows
+  # ML's ONNX Runtime and DirectML. The runner has no GPU, so the sessions run
+  # on the processor; what this catches is a Windows library that no longer
+  # loads or a binding that breaks there. The real-runtime test never skips
+  # on Windows either.
+  vision-package-tests-windows:
+    name: Vision Package Tests (Windows)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read Flutter version
+        id: flutter-ver
+        run: echo "version=$(cat ${{ env.FLUTTER_VERSION_FILE }})" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-flutter
+        id: setup-flutter
+        with:
+          flutter-version: ${{ steps.flutter-ver.outputs.version }}
+          channel: 'stable'
+
+      - name: Run the vision package's tests
+        working-directory: packages/submersion_vision
+        run: |
+          set -euo pipefail
+          flutter pub get
+          flutter test
 
   # Unit-tests the dependency-free Python guard scripts (e.g. the issue #318
   # ProGuard keep-rule checker). No Flutter/codegen needed, so it runs in
@@ -691,10 +753,17 @@ jobs:
         # different Ruby from the lanes it guards (#3495).
         run: python3 scripts/check_ruby_versions.py
 
+      - name: Check every apt install repoints the mirror first
+        # Fails if a job installs from apt before running
+        # scripts/apt_mirror.py. A slow regional EC2 mirror ran Web Smoke and
+        # the beta's Linux build past their limits and stopped every beta
+        # (#4722).
+        run: python3 scripts/check_apt_mirror.py
+
       - name: Run Python guard tests with coverage
         run: |
           mkdir -p coverage
-          guards='scripts/check_proguard_serial_keep.py,scripts/check_apk_signing_cert.py,scripts/check_native_libs_present.py,scripts/check_bundled_native_assets.py,scripts/check_glibc_floor.py,scripts/check_jni_local_refs.py,scripts/check_dc_process_isolation.py,scripts/check_ci_success_gate.py,scripts/check_flutter_setup_retried.py,scripts/check_pr_issue_link.py,scripts/fix_macho_symbol_order.py,scripts/release/sanitize_apple_store_notes.py,scripts/bundle_tests.py,scripts/filter_trivial_coverage.py,scripts/beta_failure_alert.py,scripts/release/play_beta_cooldown.py,scripts/report_inherited_failures.py,scripts/export_support_matrix_catalog.py,scripts/check_no_skipped_tests.py,scripts/check_docs_links.py,scripts/check_dependabot_gemfiles.py,scripts/dependabot_failure_alert.py,scripts/check_ruby_versions.py,scripts/demo_data/fetch_demo_db.py,scripts/demo_package_age_alert.py,scripts/demo_data/fetch_published_manifest.py,scripts/snapshot_downloads.py,scripts/check_web_bundle.py,scripts/web/check_sqlite3_wasm_lock.py,scripts/web/check_junit_ran.py,scripts/web/serve_bundle.py,scripts/web/stage_hosted_site.py,scripts/wiki_howto_index.py,scripts/geography/generate_country_names.py,scripts/site_catalogue_intake.py,tool/species_pack/region_grid.py,tool/species_pack/manifest.py,tool/species_pack/naming.py,tool/species_pack/bars.py,tool/species_pack/metrics.py,tool/species_pack/testset.py,tool/species_pack/boxes.py'
+          guards='scripts/check_proguard_serial_keep.py,scripts/check_apk_signing_cert.py,scripts/check_native_libs_present.py,scripts/check_bundled_native_assets.py,scripts/check_glibc_floor.py,scripts/check_jni_local_refs.py,scripts/check_dc_process_isolation.py,scripts/check_ci_success_gate.py,scripts/check_flutter_setup_retried.py,scripts/check_pr_issue_link.py,scripts/fix_macho_symbol_order.py,scripts/release/sanitize_apple_store_notes.py,scripts/bundle_tests.py,scripts/filter_trivial_coverage.py,scripts/beta_failure_alert.py,scripts/release/play_beta_cooldown.py,scripts/report_inherited_failures.py,scripts/export_support_matrix_catalog.py,scripts/check_no_skipped_tests.py,scripts/check_docs_links.py,scripts/check_dependabot_gemfiles.py,scripts/dependabot_failure_alert.py,scripts/check_ruby_versions.py,scripts/check_apt_mirror.py,scripts/apt_mirror.py,scripts/demo_data/fetch_demo_db.py,scripts/demo_package_age_alert.py,scripts/demo_data/fetch_published_manifest.py,scripts/snapshot_downloads.py,scripts/check_web_bundle.py,scripts/web/check_sqlite3_wasm_lock.py,scripts/web/check_junit_ran.py,scripts/web/serve_bundle.py,scripts/web/stage_hosted_site.py,scripts/wiki_howto_index.py,scripts/geography/generate_country_names.py,scripts/site_catalogue_intake.py'
           python3 -m coverage run --include="$guards" \
             scripts/check_proguard_serial_keep_test.py
           python3 -m coverage run --append --include="$guards" \
@@ -742,6 +811,10 @@ jobs:
           python3 -m coverage run --append --include="$guards" \
             scripts/check_ruby_versions_test.py
           python3 -m coverage run --append --include="$guards" \
+            scripts/check_apt_mirror_test.py
+          python3 -m coverage run --append --include="$guards" \
+            scripts/apt_mirror_test.py
+          python3 -m coverage run --append --include="$guards" \
             scripts/dependabot_failure_alert_test.py
           python3 -m coverage run --append --include="$guards" \
             scripts/demo_data/fetch_demo_db_test.py
@@ -767,22 +840,6 @@ jobs:
             scripts/geography/generate_country_names_test.py
           python3 -m coverage run --append --include="$guards" \
             scripts/site_catalogue_intake_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/region_grid_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/manifest_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/naming_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/bars_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/metrics_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/testset_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/boxes_test.py
-          python3 -m coverage run --append --include="$guards" \
-            tool/species_pack/megalodon_test.py
           python3 -m coverage report -m --include="$guards"
           python3 -m coverage xml --include="$guards" \
             -o coverage/scripts.xml
@@ -845,6 +902,7 @@ jobs:
             fi
           done
           if ! python3 -c "from PIL import features; raise SystemExit(not features.check('raqm'))"; then
+            sudo python3 scripts/apt_mirror.py
             sudo apt-get update
             sudo apt-get install -y libfribidi0
           fi
@@ -1236,6 +1294,7 @@ jobs:
           python3 -m pip install -r scripts/web/requirements-smoke.txt
           # Chromium only for the stream worker test below; the smoke itself
           # runs in Firefox and WebKit.
+          sudo python3 scripts/apt_mirror.py
           python3 -m playwright install --with-deps firefox webkit chromium
 
       - name: Serve the bundle with the hosting headers
@@ -1335,6 +1394,7 @@ jobs:
       # libsecret-tools supplies secret-tool for the keyring check below.
       - name: Install Linux dependencies
         run: |
+          sudo python3 scripts/apt_mirror.py
           sudo apt-get update
           sudo apt-get install -y \
             clang \
@@ -1579,7 +1639,7 @@ jobs:
       # runs here, a few seconds of swiftc, because this job is under CI
       # Success, so a broken floor blocks the merge.
       - name: Check the marine life memory floor
-        run: tool/species_pack/vision_cli/check_floor.sh "$RUNNER_TEMP/floor_check"
+        run: packages/submersion_vision/tool/check_floor.sh "$RUNNER_TEMP/floor_check"
 
       - uses: ./.github/actions/setup-flutter
         id: setup-flutter
@@ -1992,6 +2052,7 @@ jobs:
       # reasoning.
       - name: Install Linux dependencies
         run: |
+          sudo python3 scripts/apt_mirror.py
           sudo apt-get update
           sudo apt-get install -y \
             clang \
@@ -2333,6 +2394,8 @@ jobs:
       - analyze
       - test
       - timezone-tests
+      - vision-package-tests
+      - vision-package-tests-windows
       - script-tests
       - web-build
       - web-tests

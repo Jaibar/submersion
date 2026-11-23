@@ -66,10 +66,12 @@ void main() {
   });
 
   test('the floor does not move', () {
-    expect(AppDatabase.minimumCompatibleSchemaVersion, lessThan(376));
+    // A later rung (v378, the marks on app-applied species tags) raised the
+    // floor; v376 itself did not set it.
+    expect(AppDatabase.minimumCompatibleSchemaVersion, isNot(376));
   });
 
-  test('a fresh database has the video columns, still with no hlc', () async {
+  test('a fresh database has the video columns', () async {
     final db = AppDatabase(
       NativeDatabase.memory(setup: registerAppSqlFunctions),
     );
@@ -78,8 +80,6 @@ void main() {
     final identifications = await _columns(db, 'media_identifications');
     expect(runs, containsAll(_runColumns));
     expect(identifications, containsAll(_identificationColumns));
-    expect(runs, isNot(contains('hlc')));
-    expect(identifications, isNot(contains('hlc')));
   });
 
   test('upgrading from 375 adds them empty', () async {

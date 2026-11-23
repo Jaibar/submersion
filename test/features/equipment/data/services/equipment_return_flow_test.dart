@@ -111,13 +111,11 @@ void main() {
   late List<(EquipmentStatus, int)> statusAsks;
   late List<int> partsAsks;
   late List<(List<String>, EquipmentStatus)> statusWrites;
-  late bool statusFailed;
 
   setUp(() {
     statusAsks = [];
     partsAsks = [];
     statusWrites = [];
-    statusFailed = false;
   });
 
   EquipmentReturnFlow flow(
@@ -139,21 +137,26 @@ void main() {
       if (failStatus) throw StateError('no');
       statusWrites.add((ids, status));
     },
-    onStatusFailed: () => statusFailed = true,
   );
 
+  /// A return as a buddy page's sitting makes it (issue #4527, phase 3):
+  /// asked about at the card ([EquipmentReturnFlow.plan]), written at Save
+  /// ([EquipmentReturnFlow.write]).
   Future<int> run(
     EquipmentReturnFlow f,
     List<EquipmentItem> items, {
     DateTime? movedAt,
     String note = '',
-  }) => f.run(
-    items: items,
-    buddyId: 'b1',
-    places: places,
-    movedAt: movedAt ?? returnAt,
-    note: note,
-  );
+  }) async {
+    final plan = await f.plan(
+      items: items,
+      buddyId: 'b1',
+      places: places,
+      movedAt: movedAt ?? returnAt,
+      note: note,
+    );
+    return f.write(plan, places: places);
+  }
 
   test('each item goes back to its own previous place', () async {
     final moves = _FakeMoves(
@@ -336,21 +339,24 @@ void main() {
     expect(moves.recorded.single.ids, ['a']);
   });
 
-  test('a failed status write is reported and the moves still count', () async {
-    final moves = _FakeMoves(
-      history: {
-        'a': history('a', ['shelf']),
-      },
-    );
+  test(
+    'a failed status write at Save is not swallowed, so the Save fails',
+    () async {
+      final moves = _FakeMoves(
+        history: {
+          'a': history('a', ['shelf']),
+        },
+      );
 
-    final count = await run(flow(moves, failStatus: true), [item('a')]);
+      await expectLater(
+        run(flow(moves, failStatus: true), [item('a')]),
+        throwsStateError,
+      );
+    },
+  );
 
-    expect(count, 1);
-    expect(statusFailed, isTrue);
-  });
-
-  test('a failed write takes nothing back, leaving no gear half returned '
-      'without its prompt', () async {
+  test('a failed write takes nothing back and sets no status, leaving no '
+      'gear half returned', () async {
     final moves = _FakeMoves(
       history: {
         'a': history('a', ['shelf']),
@@ -364,7 +370,7 @@ void main() {
     );
 
     expect(moves.recorded, isEmpty);
-    expect(statusAsks, isEmpty);
+    expect(statusWrites, isEmpty);
   });
 
   test('no items writes nothing and asks nothing', () async {
@@ -400,5 +406,78 @@ void main() {
       ),
       {shelf, null},
     );
+  });
+
+  group('plan and write (issue #4527, phase 3)', () {
+    test('plan asks and writes nothing', () async {
+      final moves = _FakeMoves(
+        history: {
+          'a': history('a', ['shelf']),
+        },
+      );
+
+      final plan = await flow(moves).plan(
+        items: [item('a')],
+        buddyId: 'b1',
+        places: places,
+        movedAt: returnAt,
+      );
+
+      expect(statusAsks, [(EquipmentStatus.active, 1)]);
+      expect(plan.setActive, isTrue);
+      expect(moves.recorded, isEmpty);
+      expect(statusWrites, isEmpty);
+    });
+
+    test('write sends each item back and sets Active as planned', () async {
+      final moves = _FakeMoves(
+        history: {
+          'a': history('a', ['shelf']),
+          'b': history('b', ['shop']),
+        },
+      );
+
+      final returned = await flow(moves).write(
+        EquipmentReturnPlan(
+          items: const {
+            'a': EquipmentStatus.loaned,
+            'b': EquipmentStatus.loaned,
+          },
+          buddyId: 'b1',
+          movedAt: returnAt,
+          setActive: true,
+        ),
+        places: places,
+      );
+
+      expect(returned, 2);
+      expect(statusAsks, isEmpty);
+      expect(
+        {for (final r in moves.recorded) r.ids.single: r.locationId},
+        {'a': 'shelf', 'b': 'shop'},
+      );
+      expect(statusWrites.single.$2, EquipmentStatus.active);
+    });
+  });
+
+  test('plan names the parts the diver agreed to return', () async {
+    final moves = _FakeMoves(
+      history: {
+        'a': history('a', ['shelf']),
+      },
+      parts: {'p': EquipmentStatus.loaned},
+      current: {'p': 'anna'},
+    );
+
+    final plan = await flow(moves).plan(
+      items: [item('a')],
+      buddyId: 'b1',
+      places: places,
+      movedAt: returnAt,
+    );
+
+    expect(plan.withParts, isTrue);
+    expect(plan.partIds, {'p'});
+    expect(moves.recorded, isEmpty);
   });
 }

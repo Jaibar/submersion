@@ -282,5 +282,50 @@ extension RungsFromV340 on AppDatabase {
     // #4675). Columns only, no backfill.
     if (from < 376) await _assertIdentificationVideoColumns();
     if (from < 376) await reportProgress();
+
+    // v377: the stretches of a video already scanned, on its run (issue
+    // #4709). Column only, no backfill: a null reads as one stretch from 0
+    // to scanned_ms.
+    if (from < 377) await _assertIdentificationScannedRanges();
+    if (from < 377) await reportProgress();
+
+    // v378: the marks on a species tag the app applied (issue #4727):
+    // unconfirmed, and whether it created its sighting or species. Columns
+    // only, no backfill: null is the diver's own tag. The floor rises to
+    // 378 (see minimumCompatibleSchemaVersion).
+    if (from < 378) await _assertMediaSpeciesAppTagColumns();
+    if (from < 378) await reportProgress();
+
+    // v379: the default visibility and palette colour of the three Avelo
+    // lines on the dive profile (issue #4664). Columns only, defaulted off
+    // or null; re-asserted in beforeOpen. The floor does not move.
+    if (from < 379) await _assertAveloLineColumns();
+    if (from < 379) await reportProgress();
+
+    // v380 (issue #4847): a lone download the v356 stamp took for a combined
+    // dive gets its source back as primary with no slot, so a re-parse can
+    // replace the profile again; and a live series duplicating its source's
+    // own under another computer's label (left by the v182 pack) is demoted.
+    // Data only, so the floor does not move. Both rewrite is_primary, which
+    // is never null: declaring it in changeLogRewrittenColumns would refuse
+    // restoring every source row and series deleted before v380, so it is
+    // left out, and both repairs run again after each inbound sync apply.
+    if (from < 380) await repairLoneDownloadSources(this);
+    if (from < 380) await demoteDuplicatePrimarySeries(this);
+    if (from < 380) await reportProgress();
+
+    // v381 (issue #4876): marine life results sync. Clocks on both
+    // identification tables, a run's origin, run id and naming bars, the
+    // decision clock, and the crops table; each run gets a run id shared by
+    // its rows. The floor rises to 381 (see minimumCompatibleSchemaVersion).
+    if (from < 381) await _assertIdentificationSyncSchema();
+    if (from < 381) await reportProgress();
+
+    // v382 (issue #4909): dives.hand_set_fields, the computer-written values
+    // the diver set by hand. Nullable with no backfill, so only edits saved
+    // after the update are marked; re-asserted in beforeOpen. The floor does
+    // not move.
+    if (from < 382) await _assertDiveHandSetFieldsColumn();
+    if (from < 382) await reportProgress();
   }
 }

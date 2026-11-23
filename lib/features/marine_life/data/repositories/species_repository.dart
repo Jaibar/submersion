@@ -279,24 +279,36 @@ class SpeciesRepository {
       results,
       (r) => r.data['common_name'] as String,
       groupOf: (r) => r.data['category'],
-    ).map((row) {
-      return domain.Sighting(
-        id: row.data['id'] as String,
-        diveId: row.data['dive_id'] as String,
-        speciesId: row.data['species_id'] as String,
-        speciesName: row.data['common_name'] as String,
-        speciesCategory: SpeciesCategory.values.firstWhere(
-          (c) => c.name == row.data['category'],
-          orElse: () => SpeciesCategory.other,
-        ),
-        abundance: SightingAbundance.fromStorage(
-          row.data['abundance'] as String?,
-        ),
-        count: row.data['count'] as int,
-        notes: (row.data['notes'] as String?) ?? '',
-      );
-    }).toList();
+    ).map(_sightingFromRow).toList();
   }
+
+  /// The sighting [id], on whichever dive it is, or null.
+  Future<domain.Sighting?> getSightingById(String id) async {
+    final row = await _db
+        .customSelect(
+          'SELECT s.*, sp.common_name, sp.category '
+          'FROM sightings s '
+          'JOIN species sp ON s.species_id = sp.id '
+          'WHERE s.id = ?',
+          variables: [Variable.withString(id)],
+        )
+        .getSingleOrNull();
+    return row == null ? null : _sightingFromRow(row);
+  }
+
+  static domain.Sighting _sightingFromRow(QueryRow row) => domain.Sighting(
+    id: row.data['id'] as String,
+    diveId: row.data['dive_id'] as String,
+    speciesId: row.data['species_id'] as String,
+    speciesName: row.data['common_name'] as String,
+    speciesCategory: SpeciesCategory.values.firstWhere(
+      (c) => c.name == row.data['category'],
+      orElse: () => SpeciesCategory.other,
+    ),
+    abundance: SightingAbundance.fromStorage(row.data['abundance'] as String?),
+    count: row.data['count'] as int,
+    notes: (row.data['notes'] as String?) ?? '',
+  );
 
   /// Batched variant of [getSightingsForDive]: one query for many dives.
   /// Returns a map keyed by dive id; dives without sightings are absent.
@@ -701,20 +713,24 @@ class SpeciesRepository {
   // Species CRUD Methods
   // ===========================================================================
 
-  /// Create a custom (non-built-in) species
+  /// Creates a custom (non-built-in) species, under [id] when one is given
+  /// (a new species' page makes its id before Save; issue #4527, phase 3,
+  /// plan 11), else under a new one.
   Future<domain.Species> createSpecies({
+    String? id,
     required String commonName,
     String? scientificName,
     required SpeciesCategory category,
     String? taxonomyClass,
     String? description,
   }) async {
-    final id = _uuid.v4();
+    final givenId = id;
+    final speciesId = givenId == null || givenId.isEmpty ? _uuid.v4() : givenId;
     await _db
         .into(_db.species)
         .insert(
           SpeciesCompanion(
-            id: Value(id),
+            id: Value(speciesId),
             commonName: Value(commonName),
             scientificName: Value(scientificName),
             category: Value(category.name),
@@ -727,13 +743,13 @@ class SpeciesRepository {
     final now = DateTime.now().millisecondsSinceEpoch;
     await _syncRepository.markRecordPending(
       entityType: 'species',
-      recordId: id,
+      recordId: speciesId,
       localUpdatedAt: now,
     );
     SyncEventBus.notifyLocalChange();
 
     return domain.Species(
-      id: id,
+      id: speciesId,
       commonName: commonName,
       scientificName: scientificName,
       category: category,
@@ -825,6 +841,27 @@ class SpeciesRepository {
         )
         .getSingle();
     return (result.data['count'] as int) > 0;
+  }
+
+  /// Whether any site lists the species as expected there (diver data the
+  /// species delete would otherwise clear with it).
+  Future<bool> isSpeciesOnAnySite(String id) async {
+    final row = await _db
+        .customSelect(
+          'SELECT EXISTS(SELECT 1 FROM site_species WHERE species_id = ?) '
+          'AS used',
+          variables: [Variable.withString(id)],
+        )
+        .getSingle();
+    return row.read<int>('used') == 1;
+  }
+
+  /// The species row's sync clock, or null.
+  Future<String?> hlcOf(String id) async {
+    final row = await (_db.select(
+      _db.species,
+    )..where((t) => t.id.equals(id))).getSingleOrNull();
+    return row?.hlc;
   }
 
   // ===========================================================================

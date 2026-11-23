@@ -254,6 +254,31 @@ void main() {
     expect(binding.controller.text, '100.');
   });
 
+  test('reformat shows the value as the format now gives it, even when the '
+      'text already reads as it, and writes nothing', () {
+    var blank = false;
+    session.rebase(const _Rec(note: 'Reef'));
+    final binding = FieldTextBinding<_Rec, String>.plain(
+      session: session,
+      field: _note,
+      format: (v) => blank ? '' : v,
+    );
+    addTearDown(binding.dispose);
+    expect(binding.controller.text, 'Reef');
+
+    blank = true;
+    binding.resync();
+    expect(binding.controller.text, 'Reef');
+    binding.reformat();
+    expect(binding.controller.text, isEmpty);
+    expect(session.valueOf(_note), 'Reef');
+
+    blank = false;
+    binding.reformat();
+    expect(binding.controller.text, 'Reef');
+    expect(session.isDirty, isFalse);
+  });
+
   // For a rule that follows from the diver's own edit, and must not run
   // when the text was put there from the sitting.
   test('onEdited is told of what the diver typed, not of what arrives', () {
@@ -301,5 +326,22 @@ void main() {
     own.dispose();
 
     expect(binding.dispose, returnsNormally);
+  });
+  test('a plain binding takes any text as the value', () {
+    session = EditSession(const _Rec(note: 'Calm'));
+    addTearDown(session.dispose);
+    final plain = FieldTextBinding<_Rec, String>.plain(
+      session: session,
+      field: _note,
+      format: (v) => v,
+    );
+    addTearDown(plain.dispose);
+
+    expect(plain.controller.text, 'Calm');
+    plain.controller.text = '';
+    expect(session.working.note, '');
+    plain.controller.text = 'Surge at 12 m';
+    expect(session.working.note, 'Surge at 12 m');
+    expect(plain.isUnreadable, isFalse);
   });
 }

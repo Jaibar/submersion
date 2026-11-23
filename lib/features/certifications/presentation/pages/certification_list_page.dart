@@ -19,7 +19,7 @@ import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.da
 import 'package:submersion/features/certifications/presentation/widgets/certification_list_content.dart';
 import 'package:submersion/features/certifications/presentation/widgets/certification_summary_widget.dart';
 import 'package:submersion/features/certifications/presentation/pages/certification_detail_page.dart';
-import 'package:submersion/features/certifications/presentation/pages/certification_edit_page.dart';
+import 'package:submersion/features/certifications/presentation/pages/certification_edit_routes.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/features/certifications/presentation/providers/certification_query_providers.dart';
 import 'package:submersion/features/certifications/query/certification_query_entity.dart';
@@ -56,7 +56,7 @@ class _CertificationListPageState extends ConsumerState<CertificationListPage>
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/certifications/new');
+          openNewCertification(context);
         }
       },
       tooltip: context.l10n.certifications_list_tooltip_addCertification,
@@ -100,18 +100,18 @@ class _CertificationListPageState extends ConsumerState<CertificationListPage>
             },
           ),
           summaryBuilder: (context) => const CertificationSummaryWidget(),
+          // The page opened unlocked (issue #4527).
           editBuilder: (context, certificationId, onSaved, onCancel) =>
-              CertificationEditPage(
-                certificationId: certificationId,
-                embedded: true,
-                onSaved: onSaved,
-                onCancel: onCancel,
+              certificationEditPane(
+                context,
+                certificationId,
+                onSaved,
+                onCancel,
+                onDeleted: () => context.go(GoRouterState.of(context).uri.path),
               ),
-          createBuilder: (context, onSaved, onCancel) => CertificationEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new certification.
+          createBuilder: (context, onSaved, onCancel) =>
+              newCertificationPane(context, onSaved, onCancel),
           selectedId: ref.watch(highlightedCertificationIdProvider),
           onEntitySelected: (id) {
             ref.read(highlightedCertificationIdProvider.notifier).state = id;
@@ -209,18 +209,18 @@ class _CertificationListPageState extends ConsumerState<CertificationListPage>
           },
         ),
         summaryBuilder: (context) => const CertificationSummaryWidget(),
+        // The page opened unlocked (issue #4527).
         editBuilder: (context, certificationId, onSaved, onCancel) =>
-            CertificationEditPage(
-              certificationId: certificationId,
-              embedded: true,
-              onSaved: onSaved,
-              onCancel: onCancel,
+            certificationEditPane(
+              context,
+              certificationId,
+              onSaved,
+              onCancel,
+              onDeleted: () => context.go(GoRouterState.of(context).uri.path),
             ),
-        createBuilder: (context, onSaved, onCancel) => CertificationEditPage(
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
-        ),
+        // The page on a new certification.
+        createBuilder: (context, onSaved, onCancel) =>
+            newCertificationPane(context, onSaved, onCancel),
         floatingActionButton: fab,
       );
     }

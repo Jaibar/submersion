@@ -194,6 +194,28 @@ class MediaRepository {
     return row.read(count) ?? 0;
   }
 
+  /// [getMediaById] for many ids, in chunks; ids with no row are left out.
+  Future<List<domain.MediaItem>> getMediaByIds(List<String> ids) async {
+    final items = <domain.MediaItem>[];
+    for (final chunk in seriesIdChunks(ids, size: 500)) {
+      final rows = await (_db.select(_db.media).join([
+        leftOuterJoin(
+          _db.mediaEnrichment,
+          _db.mediaEnrichment.mediaId.equalsExp(_db.media.id),
+        ),
+      ])..where(_db.media.id.isIn(chunk))).get();
+      for (final row in rows) {
+        items.add(
+          mediaItemFromRow(
+            row.readTable(_db.media),
+            row.readTableOrNull(_db.mediaEnrichment),
+          ),
+        );
+      }
+    }
+    return items;
+  }
+
   /// Get single media item by ID
   /// Includes enrichment data (depth, temperature) if available
   Future<domain.MediaItem?> getMediaById(String id) async {
@@ -2556,11 +2578,22 @@ class MediaRepository {
   /// stale after the move, so they are deleted with tombstones (enrichment
   /// is an HLC-synced entity) and recomputed lazily by DiveMediaEnricher
   /// the next time the new dive's media renders.
+  ///
+  /// One entry in History labelled as a move, or part of the operation
+  /// already running (an agent's write) (issue #4527).
   Future<void> reassignMediaToDive(
     List<String> mediaIds,
     String newDiveId,
   ) async {
     if (mediaIds.isEmpty) return;
+    await ChangeLogScope.bulk(
+      DatabaseService.instance.databaseOrNull,
+      label: ChangeLogLabels.moveMedia,
+      body: () => _reassign(mediaIds, newDiveId),
+    );
+  }
+
+  Future<void> _reassign(List<String> mediaIds, String newDiveId) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     await _db.transaction(() async {
       await _dropEnrichmentRows(mediaIds);

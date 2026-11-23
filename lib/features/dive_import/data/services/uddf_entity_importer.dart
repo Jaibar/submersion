@@ -58,6 +58,7 @@ import 'package:submersion/features/dive_centers/domain/entities/dive_center.dar
 import 'package:submersion/features/dive_log/data/repositories/dive_computer_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/dive_repository_impl.dart';
 import 'package:submersion/features/dive_log/data/repositories/tank_pressure_repository.dart';
+import 'package:submersion/features/dive_log/data/services/hand_set_fields.dart';
 import 'package:submersion/features/dive_log/domain/entities/computer_tissue_snapshot.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive_custom_field.dart';
@@ -97,6 +98,7 @@ import 'package:submersion/features/tags/data/repositories/tag_repository.dart';
 import 'package:submersion/features/tags/domain/entities/tag.dart';
 import 'package:submersion/features/trips/data/repositories/trip_repository.dart';
 import 'package:submersion/features/trips/domain/entities/trip.dart';
+import 'package:submersion/features/trips/domain/services/imported_dive_trip.dart';
 import 'package:submersion/features/trips/domain/services/trip_for_dive_date.dart';
 import 'package:submersion/features/tank_presets/domain/entities/tank_preset_entity.dart';
 import 'package:submersion/core/text/blank_text.dart';
@@ -3050,9 +3052,14 @@ class UddfEntityImporter {
       // A merged batch says per dive whether its own file had trips.
       final fileHasTrips =
           diveData[PayloadMerger.sourceHasTripsKey] as bool? ?? sourceHasTrips;
-      if (linkedTripId == null &&
-          sourceDateTime != null &&
-          (tripRef != null || !fileHasTrips)) {
+      // The rule is shared with the import review, which shows the trip
+      // (#3022).
+      if (sourceDateTime != null &&
+          placesImportedDiveByDate(
+            hasOwnTrip: linkedTripId != null,
+            hasTripRef: tripRef != null,
+            sourceHasTrips: fileHasTrips,
+          )) {
         diverTrips ??= await repos.tripRepository.getAllTrips(diverId: diverId);
         linkedTripId = tripForDiveDate(sourceDateTime, diverTrips)?.id;
       }
@@ -3110,6 +3117,10 @@ class UddfEntityImporter {
       final excludedFromGasStats =
           diveData['excludedFromGasStats'] as bool? ?? false;
       final gasSwitchesEdited = diveData['gasSwitchesEdited'] as bool? ?? false;
+      // Read and written again, so damaged text marks nothing (issue #4909).
+      final handSetFields = HandSetMarks.encode(
+        HandSetMarks.decode(diveData['handSetFields'] as String?),
+      );
       final mediaTimeOffsetSeconds =
           diveData['mediaTimeOffsetSeconds'] as int? ?? 0;
 
@@ -3227,6 +3238,7 @@ class UddfEntityImporter {
         excludedFromStats: excludedFromStats,
         excludedFromGasStats: excludedFromGasStats,
         gasSwitchesEdited: gasSwitchesEdited,
+        handSetFields: handSetFields,
         mediaTimeOffsetSeconds: mediaTimeOffsetSeconds,
         courseIds: linkedCourseIds,
         setpointLow: asDoubleOrNull(diveData['setpointLow']),

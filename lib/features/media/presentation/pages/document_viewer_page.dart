@@ -1,16 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:pdfrx/pdfrx.dart';
-import 'package:share_plus/share_plus.dart';
 
 import 'package:submersion/core/providers/provider.dart';
-import 'package:submersion/core/utils/share_anchor.dart';
-import 'package:submersion/features/media/data/services/media_share_temp_file.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/domain/entities/photo_record.dart';
+import 'package:submersion/features/media/presentation/editing/attachment_details_hold.dart';
+import 'package:submersion/features/media/presentation/editing/attachment_page_closes_when_removed.dart';
+import 'package:submersion/features/media/presentation/editing/photo_viewer_editing.dart';
+import 'package:submersion/features/media/presentation/helpers/document_open_helper.dart';
 import 'package:submersion/features/media/presentation/providers/media_bytes_providers.dart';
 import 'package:submersion/features/media/presentation/widgets/attachment_details_sheet.dart';
 import 'package:submersion/l10n/l10n_extension.dart';
-import 'package:submersion/features/demo_mode/presentation/demo_seal_guard.dart';
-import 'package:submersion/features/demo_mode/domain/demo_sealed_feature.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_bar.dart';
 
 /// Full-screen in-app viewer for PDF document attachments.
 ///
@@ -22,8 +25,10 @@ class DocumentViewerPage extends ConsumerStatefulWidget {
   final MediaItem item;
 
   /// The site this document is attached to, when its category and display
-  /// size may be edited here (issue #1039). Null for dive and equipment
-  /// documents, which hides Edit details. The filename is never editable.
+  /// size may be edited here (issue #1039). The document then has its own
+  /// lock (issue #4527): opened locked, with no Edit details, and unlocked
+  /// its details are held until one Save. Null for dive and equipment
+  /// documents, which read only. The filename is never editable.
   final String? editableSiteId;
 
   const DocumentViewerPage({
@@ -36,119 +41,134 @@ class DocumentViewerPage extends ConsumerStatefulWidget {
   ConsumerState<DocumentViewerPage> createState() => _DocumentViewerPageState();
 }
 
-class _DocumentViewerPageState extends ConsumerState<DocumentViewerPage> {
+class _DocumentViewerPageState extends ConsumerState<DocumentViewerPage>
+    with
+        PhotoViewerEditing<DocumentViewerPage>,
+        AttachmentPageClosesWhenRemoved<DocumentViewerPage> {
   /// pdfrx needs its one-time Flutter bootstrap before the first PdfViewer
   /// builds; the call is idempotent and cheap afterwards.
   late final Future<void> _engineReady = pdfrxFlutterInitialize();
 
-  /// The item as last saved here, so the app bar shows a rename and a
-  /// second Edit details opens on the saved category and size, not the ones
-  /// the page was opened with. The bytes stay keyed on [widget.item], so an
-  /// edit does not reload the PDF.
-  late MediaItem _item = widget.item;
+  /// Whether the document has its own lock here.
+  bool get _hasLock => widget.editableSiteId != null;
+
+  @override
+  bool get editingOffered => _hasLock && super.editingOffered;
+
+  @override
+  bool get unlocksDocuments => true;
+
+  @override
+  void dispose() {
+    disposePhotoEditing();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final resolvedAsync = ref.watch(mediaBytesProvider(widget.item));
+    final stored = followStoredPhoto(widget.item);
+    // Only where the document has its own lock; today's viewer stays.
+    if (_hasLock) {
+      closeWhenRemoved(widget.item.id, siteId: widget.editableSiteId!);
+    }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          _item.originalFilename ?? context.l10n.media_documentViewer_title,
-          overflow: TextOverflow.ellipsis,
-        ),
-        actions: [
-          if (widget.editableSiteId != null)
-            IconButton(
-              icon: const Icon(Icons.edit_outlined),
-              tooltip: context.l10n.media_siteAttachment_editDetails,
-              onPressed: () async {
-                final saved = await showAttachmentDetailsSheet(
-                  context,
-                  item: _item,
-                  siteId: widget.editableSiteId!,
-                );
-                if (saved != null && mounted) {
-                  setState(() => _item = saved);
+    return photoEditScope(
+      child: Scaffold(
+        appBar: photoUnlocked
+            ? _editingBar(context)
+            : _lockedBar(context, stored),
+        body: resolvedAsync.when(
+          data: (resolved) {
+            if (resolved.isUnavailable || resolved.bytes == null) {
+              return _UnavailableState(item: widget.item);
+            }
+            return FutureBuilder<void>(
+              future: _engineReady,
+              builder: (context, snapshot) {
+                if (snapshot.hasError) {
+                  return _UnavailableState(item: widget.item);
                 }
+                if (snapshot.connectionState != ConnectionState.done) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                return PdfViewer.data(
+                  resolved.bytes!,
+                  sourceName: widget.item.id,
+                  params: PdfViewerParams(
+                    // A corrupt file must degrade to the unavailable state,
+                    // not crash the page.
+                    errorBannerBuilder: (context, error, stackTrace, _) =>
+                        _UnavailableState(item: widget.item),
+                  ),
+                );
               },
-            ),
-          // Builder so the share popover anchors to this button on iPad:
-          // findRenderObject from a Builder's context descends to the
-          // IconButton, whereas the page's context would yield the whole page.
-          Builder(
-            builder: (buttonContext) => IconButton(
-              icon: const Icon(Icons.share),
-              tooltip: context.l10n.media_photoViewer_shareTooltip,
-              onPressed: () => _share(buttonContext),
-            ),
-          ),
-        ],
-      ),
-      body: resolvedAsync.when(
-        data: (resolved) {
-          if (resolved.isUnavailable || resolved.bytes == null) {
-            return _UnavailableState(item: widget.item);
-          }
-          return FutureBuilder<void>(
-            future: _engineReady,
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return _UnavailableState(item: widget.item);
-              }
-              if (snapshot.connectionState != ConnectionState.done) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              return PdfViewer.data(
-                resolved.bytes!,
-                sourceName: widget.item.id,
-                params: PdfViewerParams(
-                  // A corrupt file must degrade to the unavailable state,
-                  // not crash the page.
-                  errorBannerBuilder: (context, error, stackTrace, _) =>
-                      _UnavailableState(item: widget.item),
-                ),
-              );
-            },
-          );
-        },
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (_, _) => _UnavailableState(item: widget.item),
+            );
+          },
+          loading: () => const Center(child: CircularProgressIndicator()),
+          error: (_, _) => _UnavailableState(item: widget.item),
+        ),
       ),
     );
   }
 
-  Future<void> _share(BuildContext context) async {
-    if (!demoSealGuard(context, DemoSealedFeature.share)) {
-      return;
-    }
-    final l10n = context.l10n;
-    // Resolved before the awaits below: the button is guaranteed mounted now.
-    final anchor = shareAnchorFrom(context);
-    try {
-      final resolved = await ref.read(mediaBytesProvider(widget.item).future);
-      if (resolved.isUnavailable || resolved.bytes == null) {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(l10n.media_photoViewer_cannotShare)),
-          );
-        }
-        return;
-      }
-      final file = await writeShareTempFile(_item, resolved.bytes!);
-      await SharePlus.instance.share(
-        ShareParams(
-          files: [XFile(file.path, mimeType: _item.shareMimeType)],
-          sharePositionOrigin: anchor,
+  /// The bar while locked: the lock where the document has one, and Share.
+  PreferredSizeWidget _lockedBar(BuildContext context, PhotoRecord? stored) {
+    return AppBar(
+      title: Text(
+        widget.item.originalFilename ?? context.l10n.media_documentViewer_title,
+        overflow: TextOverflow.ellipsis,
+      ),
+      actions: [
+        // A device that changes no media (a browser) reads only.
+        if (_hasLock && editingOffered)
+          IconButton(
+            key: const ValueKey('document_unlock'),
+            icon: const Icon(Icons.lock_outline),
+            tooltip: context.l10n.recordEdit_unlockTooltip,
+            onPressed: canUnlock(widget.item, stored)
+                ? () => unlockPhoto(stored!)
+                : null,
+          ),
+        // Builder so the share popover anchors to this button on iPad:
+        // findRenderObject from a Builder's context descends to the
+        // IconButton, whereas the page's context would yield the whole page.
+        Builder(
+          builder: (buttonContext) => IconButton(
+            icon: const Icon(Icons.share),
+            tooltip: context.l10n.media_photoViewer_shareTooltip,
+            onPressed: () =>
+                DocumentOpenHelper.share(buttonContext, ref, widget.item),
+          ),
         ),
-      );
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(l10n.media_photoViewer_failedToShare('$e'))),
-        );
-      }
-    }
+      ],
+    );
+  }
+
+  /// The bar while unlocked: Cancel, Save, and Edit details, whose choice
+  /// is held until Save.
+  PreferredSizeWidget _editingBar(BuildContext context) {
+    final controller = photoEditController;
+    return RecordEditBar(
+      title: context.l10n.media_documentViewer_editing,
+      canSave: controller.isDirty,
+      isSaving: controller.isSaving,
+      onCancel: () => unawaited(cancelPhotoSitting()),
+      onSave: () => unawaited(savePhotoAndReport()),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.edit_outlined),
+          tooltip: context.l10n.media_siteAttachment_editDetails,
+          onPressed: () => showAttachmentDetailsSheet(
+            context,
+            item: shownItem(widget.item, const []),
+            siteId: widget.editableSiteId!,
+            onHold: (category, size) =>
+                holdAttachmentDetails(photoSitting, category, size),
+          ),
+        ),
+      ],
+    );
   }
 }
 

@@ -101,16 +101,19 @@ const _guardedHandlers = <(String, String)>[
     'Future<void> scanGalleryInSitting(',
   ),
   (
-    'lib/features/trips/presentation/pages/trip_gallery_page.dart',
-    'Future<void> _showScanDialog(',
+    // A trip page's Photos card holds the scanned photos until its Save.
+    'lib/features/trips/presentation/helpers/trip_scan_in_sitting.dart',
+    'Future<void> scanTripPhotosInSitting(',
   ),
   (
-    'lib/features/trips/presentation/helpers/trip_scan_actions.dart',
-    'Future<void> scanGalleryForTripPhotos(',
+    // Photos added on a species page in a sitting are written at Save.
+    'lib/features/media/presentation/helpers/species_photo_import_helper.dart',
+    'static Future<List<PreparedMedia>?> preparePhotosForSpecies(',
   ),
   (
-    'lib/features/documents/presentation/pages/document_edit_page.dart',
-    'Future<void> _addPage(',
+    // The form and a document page's Pages card both add pages through it.
+    'lib/features/documents/presentation/widgets/document_page_add.dart',
+    'Future<List<DocumentPage>?> addDocumentPage(',
   ),
   (
     'lib/features/media/presentation/helpers/media_link_replacer.dart',

@@ -100,9 +100,10 @@ Defined in `lib/shared/widgets/main_scaffold.dart`:
 ├── SiteListPage → SiteListContent
 ├── /map → SiteMapPage
 ├── /import → SiteImportPage
-├── /new → SiteEditPage
+├── /new → SiteDetailPage.newSite
+├── /merge → SiteMergePage
 └── /:siteId → SiteDetailPage
-    └── /edit → SiteEditPage
+    └── /edit → redirect to /:siteId?mode=edit
 ```
 
 ### Equipment
@@ -112,12 +113,12 @@ Defined in `lib/shared/widgets/main_scaffold.dart`:
 ├── EquipmentListPage → EquipmentListContent
 │   └── EquipmentSummaryWidget
 ├── /sets → EquipmentSetListPage
-│   ├── /new → EquipmentSetEditPage
+│   ├── /new → EquipmentSetDetailPage (a new set, unlocked)
 │   └── /:setId → EquipmentSetDetailPage
-│       └── /edit → EquipmentSetEditPage
-├── /new → EquipmentEditPage
+│       └── /edit → redirect to /:setId?mode=edit
+├── /new → EquipmentDetailPage (a new item, unlocked)
 └── /:equipmentId → EquipmentDetailPage (1.3k lines)
-    └── /edit → EquipmentEditPage
+    └── /edit → redirect to /:equipmentId?mode=edit
 ```
 
 ### Social Features
@@ -126,9 +127,9 @@ Defined in `lib/shared/widgets/main_scaffold.dart`:
 /buddies
 ├── BuddyListPage → BuddyListContent
 │   └── BuddyPicker, BuddySummaryWidget
-├── /new → BuddyEditPage
+├── /new → BuddyDetailPage (a new buddy, unlocked)
 └── /:buddyId → BuddyDetailPage
-    └── /edit → BuddyEditPage
+    └── /edit → redirect to /:buddyId?mode=edit
 
 /divers
 ├── DiverListPage
@@ -138,16 +139,16 @@ Defined in `lib/shared/widgets/main_scaffold.dart`:
 
 /certifications
 ├── CertificationListPage → CertificationListContent
-├── /new → CertificationEditPage
+├── /new → CertificationDetailPage (a new certification, unlocked)
 └── /:certificationId → CertificationDetailPage
-    └── /edit → CertificationEditPage
+    └── /edit → redirect to /:certificationId?mode=edit
 
 /dive-centers
 ├── DiveCenterListPage → DiveCenterListContent
 │   └── DiveCenterPicker, DiveCenterSummaryWidget
-├── /new → DiveCenterEditPage
+├── /new → DiveCenterDetailPage (a new dive centre, unlocked)
 └── /:centerId → DiveCenterDetailPage
-    └── /edit → DiveCenterEditPage
+    └── /edit → redirect to /:centerId?mode=edit
 ```
 
 ### Trips
@@ -156,9 +157,9 @@ Defined in `lib/shared/widgets/main_scaffold.dart`:
 /trips
 ├── TripListPage → TripListContent
 │   └── TripPicker, TripSummaryWidget
-├── /new → TripEditPage
+├── /new → TripDetailPage (a new trip, unlocked)
 └── /:tripId → TripDetailPage
-    └── /edit → TripEditPage
+    └── /edit → redirect to /:tripId?mode=edit, keeping section and noteDay
 ```
 
 ### Statistics

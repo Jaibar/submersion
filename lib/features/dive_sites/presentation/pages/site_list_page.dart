@@ -29,7 +29,7 @@ import 'package:submersion/features/dive_sites/presentation/widgets/site_list_co
 import 'package:submersion/features/dive_sites/presentation/widgets/site_map_content.dart';
 import 'package:submersion/features/dive_sites/presentation/widgets/site_summary_widget.dart';
 import 'package:submersion/features/dive_sites/presentation/pages/site_detail_page.dart';
-import 'package:submersion/features/dive_sites/presentation/pages/site_edit_page.dart';
+import 'package:submersion/features/dive_sites/presentation/pages/site_edit_routes.dart';
 import 'package:submersion/features/settings/presentation/providers/settings_providers.dart';
 import 'package:submersion/features/dive_sites/presentation/providers/site_list_count_provider.dart';
 import 'package:submersion/features/settings/presentation/providers/list_arrangement_writes.dart';
@@ -90,7 +90,7 @@ class _SiteListPageState extends ConsumerState<SiteListPage>
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/sites/new');
+          openNewSite(context);
         }
       },
       tooltip: context.l10n.diveSites_fab_tooltip,
@@ -119,15 +119,14 @@ class _SiteListPageState extends ConsumerState<SiteListPage>
           onDeleted: () => _leaveDeletedSite(context),
         ),
         summaryBuilder: (context) => const SiteSummaryWidget(),
-        editBuilder: (context, id, onSaved, onCancel) => SiteEditPage(
-          siteId: id,
-          embedded: true,
-          onSaved: onSaved,
-          onCancel: onCancel,
+        editBuilder: (context, id, onSaved, onCancel) => siteEditPane(
+          context,
+          id,
+          onSaved,
+          onCancel,
           onDeleted: () => _leaveDeletedSite(context),
         ),
-        createBuilder: (context, onSaved, onCancel) =>
-            SiteEditPage(embedded: true, onSaved: onSaved, onCancel: onCancel),
+        createBuilder: newSitePane,
         mapContent: SiteMapContent(
           selectedId: ref.watch(highlightedSiteIdProvider),
           onItemSelected: (siteId) {
@@ -297,18 +296,14 @@ class _SiteListPageState extends ConsumerState<SiteListPage>
               context.go('$currentPath?selected=$siteId');
             },
           ),
-          editBuilder: (context, id, onSaved, onCancel) => SiteEditPage(
-            siteId: id,
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
+          editBuilder: (context, id, onSaved, onCancel) => siteEditPane(
+            context,
+            id,
+            onSaved,
+            onCancel,
             onDeleted: () => _leaveDeletedSite(context),
           ),
-          createBuilder: (context, onSaved, onCancel) => SiteEditPage(
-            embedded: true,
-            onSaved: onSaved,
-            onCancel: onCancel,
-          ),
+          createBuilder: newSitePane,
           floatingActionButton: fab,
         ),
       );

@@ -48,6 +48,7 @@ import 'package:submersion/features/dive_log/presentation/widgets/dive_detail/di
 import 'package:submersion/features/dive_lab/presentation/what_if_entry.dart';
 import 'package:submersion/features/dive_log/presentation/pages/gas_gf_what_if_page.dart';
 import 'package:submersion/features/dive_log/data/services/derived_metrics_scheduler.dart';
+import 'package:submersion/features/dive_log/data/services/hand_set_fields.dart';
 import 'package:submersion/features/dive_log/domain/entities/dive.dart';
 import 'package:submersion/features/dive_log/domain/entities/new_dive_request.dart';
 import 'package:submersion/features/dive_log/presentation/pages/new_dive_after_create.dart';
@@ -81,6 +82,7 @@ import 'package:submersion/features/dive_log/presentation/widgets/dive_detail/di
 import 'package:submersion/features/dive_log/presentation/widgets/dive_detail/dive_detail_section_list.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/pinned_profile/pinned_profile_overlay.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/dive_nav_buttons.dart';
+import 'package:submersion/features/dive_log/presentation/widgets/hand_set_review_dialog.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/mirror_dive_dialog.dart';
 import 'package:submersion/features/dive_log/presentation/widgets/unfilled_dive_chip.dart';
 import 'package:submersion/features/dive_roles/presentation/providers/dive_role_providers.dart';
@@ -120,6 +122,8 @@ import 'package:submersion/shared/widgets/record_editing/edit_card.dart';
 import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_controller.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_host.dart';
+import 'package:submersion/shared/widgets/record_editing/record_open_unlocked.dart';
+import 'package:submersion/shared/widgets/record_editing/record_pane_row.dart';
 import 'package:submersion/shared/widgets/record_editing/record_operation_gate.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_leave_guard.dart';
 import 'package:submersion/shared/widgets/export_destination_sheet.dart';
@@ -210,6 +214,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage>
         _DiveDetailPageExports,
         RecordEditHost<DiveDetailPage, Dive>,
         _DiveDetailPageEditing,
+        RecordOpenUnlocked<DiveDetailPage, Dive>,
         _DiveDetailPageUnlockOpen,
         _DiveDetailPageCreating,
         _DiveDetailPageOperations,
@@ -442,6 +447,9 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage>
         siteId: embeddedSiteId,
         embedded: true,
         onClose: widget.onCloseEmbeddedSite,
+        // Deleted or removed from here (it unlocks in place), the site is
+        // gone: back to the dive, as the back arrow goes.
+        onDeleted: widget.onCloseEmbeddedSite,
       );
     }
 
@@ -460,7 +468,9 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage>
       // mode in the pane, which opens the dive unlocked there (issue #4527,
       // plan 11). Once its sitting has been and gone, the dive moves as it
       // is.
-      final mode = widget.openUnlocked && !_openedUnlocked ? '&mode=edit' : '';
+      final mode = widget.openUnlocked && !hasOpenedUnlocked
+          ? '&mode=edit'
+          : '';
       _redirectingToPane = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
@@ -513,7 +523,7 @@ class _DiveDetailPageState extends ConsumerState<DiveDetailPage>
             body: Center(child: Text(context.l10n.diveLog_detail_notFound)),
           );
         }
-        _openUnlockedOnce(dive);
+        openUnlockedOnce(dive);
         return _DiveShortcuts(
           diveId: dive.id,
           enabled: !isSittingOpen,

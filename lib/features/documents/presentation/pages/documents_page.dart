@@ -13,7 +13,7 @@ import 'package:submersion/features/documents/domain/entities/document.dart';
 import 'package:submersion/features/documents/presentation/document_l10n.dart';
 import 'package:submersion/features/documents/presentation/helpers/document_export_flow.dart';
 import 'package:submersion/features/documents/presentation/pages/document_detail_page.dart';
-import 'package:submersion/features/documents/presentation/pages/document_edit_page.dart';
+import 'package:submersion/features/documents/presentation/pages/document_edit_routes.dart';
 import 'package:submersion/features/documents/presentation/providers/document_providers.dart';
 import 'package:submersion/features/documents/presentation/widgets/document_tag_filter_row.dart';
 import 'package:submersion/features/documents/presentation/widgets/document_tile.dart';
@@ -69,11 +69,7 @@ class DocumentsPage extends ConsumerWidget {
                 .toString(),
           );
         } else {
-          context.push(
-            type == null
-                ? '/documents/new'
-                : '/documents/new?type=${type.storage}',
-          );
+          openNewDocument(context, type: type);
         }
       },
       tooltip: l10n.documents_add,
@@ -118,18 +114,17 @@ class DocumentsPage extends ConsumerWidget {
           color: Theme.of(context).colorScheme.outlineVariant,
         ),
       ),
-      editBuilder: (context, id, onSaved, onCancel) => DocumentEditPage(
-        documentId: id,
-        embedded: true,
-        onSaved: onSaved,
-        onCancel: onCancel,
+      // The page opened unlocked (issue #4527).
+      editBuilder: (context, id, onSaved, onCancel) => documentEditPane(
+        context,
+        id,
+        onSaved,
+        onCancel,
+        onDeleted: () => context.go(GoRouterState.of(context).uri.path),
       ),
-      createBuilder: (context, onSaved, onCancel) => DocumentEditPage(
-        embedded: true,
-        initialType: initialType,
-        onSaved: onSaved,
-        onCancel: onCancel,
-      ),
+      // The page on a new document (plan 11).
+      createBuilder: (context, onSaved, onCancel) =>
+          newDocumentPane(context, onSaved, onCancel, initialType: initialType),
       floatingActionButton: fab,
     );
   }

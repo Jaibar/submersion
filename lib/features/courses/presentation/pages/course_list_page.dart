@@ -20,7 +20,7 @@ import 'package:submersion/shared/widgets/table_mode_layout/table_mode_layout.da
 import 'package:submersion/features/courses/presentation/widgets/course_list_content.dart';
 import 'package:submersion/features/courses/presentation/widgets/course_summary_widget.dart';
 import 'package:submersion/features/courses/presentation/pages/course_detail_page.dart';
-import 'package:submersion/features/courses/presentation/pages/course_edit_page.dart';
+import 'package:submersion/features/courses/presentation/pages/course_edit_routes.dart';
 import 'package:submersion/core/query/domain/query_subject.dart';
 import 'package:submersion/features/courses/presentation/providers/course_query_providers.dart';
 import 'package:submersion/features/courses/query/course_query_entity.dart';
@@ -57,7 +57,7 @@ class _CourseListPageState extends ConsumerState<CourseListPage>
           final currentPath = state.uri.path;
           context.go('$currentPath?mode=new');
         } else {
-          context.push('/courses/new');
+          openNewCourse(context);
         }
       },
       tooltip: context.l10n.courses_action_add,
@@ -101,17 +101,17 @@ class _CourseListPageState extends ConsumerState<CourseListPage>
             },
           ),
           summaryBuilder: (context) => const CourseSummaryWidget(),
-          editBuilder: (context, courseId, onSaved, onCancel) => CourseEditPage(
-            courseId: courseId,
-            embedded: true,
-            onSaved: () => onSaved(courseId),
-            onCancel: onCancel,
+          // The page opened unlocked (issue #4527).
+          editBuilder: (context, courseId, onSaved, onCancel) => courseEditPane(
+            context,
+            courseId,
+            onSaved,
+            onCancel,
+            onDeleted: () => context.go(GoRouterState.of(context).uri.path),
           ),
-          createBuilder: (context, onSaved, onCancel) => CourseEditPage(
-            embedded: true,
-            onSavedWithId: onSaved,
-            onCancel: onCancel,
-          ),
+          // The page on a new course (plan 11).
+          createBuilder: (context, onSaved, onCancel) =>
+              newCoursePane(context, onSaved, onCancel),
           selectedId: ref.watch(highlightedCourseIdProvider),
           onEntitySelected: (id) {
             ref.read(highlightedCourseIdProvider.notifier).state = id;
@@ -216,17 +216,17 @@ class _CourseListPageState extends ConsumerState<CourseListPage>
           },
         ),
         summaryBuilder: (context) => const CourseSummaryWidget(),
-        editBuilder: (context, courseId, onSaved, onCancel) => CourseEditPage(
-          courseId: courseId,
-          embedded: true,
-          onSaved: () => onSaved(courseId),
-          onCancel: onCancel,
+        // The page opened unlocked (issue #4527).
+        editBuilder: (context, courseId, onSaved, onCancel) => courseEditPane(
+          context,
+          courseId,
+          onSaved,
+          onCancel,
+          onDeleted: () => context.go(GoRouterState.of(context).uri.path),
         ),
-        createBuilder: (context, onSaved, onCancel) => CourseEditPage(
-          embedded: true,
-          onSavedWithId: onSaved,
-          onCancel: onCancel,
-        ),
+        // The page on a new course (plan 11).
+        createBuilder: (context, onSaved, onCancel) =>
+            newCoursePane(context, onSaved, onCancel),
         floatingActionButton: fab,
       );
     }

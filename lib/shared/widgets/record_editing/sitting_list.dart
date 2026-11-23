@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import 'package:submersion/core/services/logger_service.dart';
@@ -25,9 +27,26 @@ class SittingList<T, E> {
     required this.key,
     required this.cardId,
     required this.read,
-    required this.write,
+    required Future<Object?> Function(T record, List<E> loaded, List<E> current)
+    this.write,
     this.same,
-  });
+  }) : writeIn = null;
+
+  /// A list whose write is handed the sitting itself ([writeIn]), for one
+  /// that needs what the sitting keeps beside its rows: the writers its
+  /// rows' photos go through, say.
+  const SittingList.withSession({
+    required this.key,
+    required this.cardId,
+    required this.read,
+    required Future<Object?> Function(
+      EditSession<T> session,
+      List<E> loaded,
+      List<E> current,
+    )
+    this.writeIn,
+    this.same,
+  }) : write = null;
 
   /// The held change's key, and the prefix of the notes this list keeps.
   final String key;
@@ -42,8 +61,16 @@ class SittingList<T, E> {
   /// rows in [loaded] missing from [current] go, changed ones are updated,
   /// new ones added. [record] is the sitting's working record. It may answer
   /// whether it changed any row ([wroteChange]); null says nothing.
-  final Future<Object?> Function(T record, List<E> loaded, List<E> current)
+  final Future<Object?> Function(T record, List<E> loaded, List<E> current)?
   write;
+
+  /// [write], handed the sitting rather than its working record.
+  final Future<Object?> Function(
+    EditSession<T> session,
+    List<E> loaded,
+    List<E> current,
+  )?
+  writeIn;
 
   /// Whether two lists are the same change. Null is [listEquals].
   final bool Function(List<E> a, List<E> b)? same;
@@ -53,6 +80,39 @@ class SittingList<T, E> {
   String get _readKey => '$key.read';
   String get _failedKey => '$key.failed';
   String get _wroteKey => '$key.wrote';
+  String get _readingKey => '$key.reading';
+  String get _changesKey => '$key.changes';
+
+  /// Tells its listeners whenever this list's rows change in [session]: a
+  /// read lands or fails, or the diver sets the list. An editor that draws
+  /// only the rows listens here rather than to the whole sitting, and can
+  /// draw a read that answers after it was built.
+  Listenable changes(EditSession<T> session) => _changes(session);
+
+  ValueNotifier<int> _changes(EditSession<T> session) {
+    var changes = session.recall<ValueNotifier<int>>(_changesKey);
+    if (changes == null) {
+      changes = ValueNotifier<int>(0);
+      session.remember(_changesKey, changes);
+    }
+    return changes;
+  }
+
+  void _tell(EditSession<T> session) {
+    final changes = session.recall<ValueNotifier<int>>(_changesKey);
+    if (changes != null) changes.value++;
+  }
+
+  /// The rows the sitting has, reading them first when it has none: the read
+  /// already asked is waited for (asking another would drop its answer), and
+  /// one is asked only when none is running. Null when the rows cannot be
+  /// read, or the sitting has ended.
+  Future<List<E>?> currentOrRead(EditSession<T> session) async {
+    final rows = current(session);
+    if (rows != null || session.isDisposed) return rows;
+    await (session.recall<Future<void>>(_readingKey) ?? load(session));
+    return session.isDisposed ? null : current(session);
+  }
 
   /// Reads the rows unless the diver has changed them in this sitting.
   /// Tracked. A read that answers after the list was changed, after a
@@ -82,6 +142,7 @@ class SittingList<T, E> {
         if (!session.isDisposed &&
             identical(session.recall<Object>(_readKey), asked)) {
           session.remember(_failedKey, true);
+          _tell(session);
         }
         return;
       }
@@ -89,9 +150,39 @@ class SittingList<T, E> {
       if (!identical(session.recall<Object>(_readKey), asked)) return;
       if (isChanged(session)) return;
       session.remember(_loadedKey, List<E>.unmodifiable(rows));
+      _tell(session);
     }();
-    session.track(work);
+    session
+      ..remember(_readingKey, work)
+      ..track(work);
+    unawaited(
+      work.whenComplete(() {
+        if (!session.isDisposed &&
+            identical(session.recall<Future<void>>(_readingKey), work)) {
+          session.remember(_readingKey, null);
+        }
+      }),
+    );
     return work;
+  }
+
+  /// Starts the list empty without a read: for a record not yet created,
+  /// which has no rows stored (a new site, issue #4527), so no read can
+  /// fail and leave it unloaded. A read asked before is dropped when it
+  /// answers. Does nothing once the list is changed, or while the sitting
+  /// is frozen or has ended.
+  void loadNone(EditSession<T> session) {
+    if (session.isDisposed || session.isFrozen || isChanged(session)) return;
+    session
+      ..remember(_readKey, Object())
+      ..remember(_readingKey, null)
+      ..remember(_failedKey, null)
+      ..remember(_loadedKey, List<E>.unmodifiable(<E>[]));
+    // Told after the build it may be called from (a sitting opened as a
+    // page builds) has finished.
+    scheduleMicrotask(() {
+      if (!session.isDisposed) _tell(session);
+    });
   }
 
   /// Whether the last read failed, so an editor can say so and ask again
@@ -130,6 +221,7 @@ class SittingList<T, E> {
       session
         ..remember(_currentKey, null)
         ..releaseWrite(key);
+      _tell(session);
       return;
     }
     session
@@ -138,16 +230,18 @@ class SittingList<T, E> {
         key,
         cardId: cardId,
         write: () async {
-          final wrote = await write(
-            session.working,
-            loaded(session) ?? const [],
-            current(session) ?? const [],
-          );
+          final rows = loaded(session) ?? const [];
+          final next = current(session) ?? const [];
+          final writeIn = this.writeIn;
+          final wrote = writeIn != null
+              ? await writeIn(session, rows, next)
+              : await write!(session.working, rows, next);
           if (!session.isDisposed) {
             session.remember(_wroteKey, wrote is bool ? wrote : null);
           }
         },
       );
+    _tell(session);
   }
 }
 

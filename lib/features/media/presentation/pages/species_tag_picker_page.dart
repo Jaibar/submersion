@@ -3,6 +3,7 @@ import 'package:submersion/core/providers/provider.dart';
 
 import 'package:submersion/core/utils/unit_formatter.dart';
 import 'package:submersion/features/media/domain/entities/species_tag_candidate_group.dart';
+import 'package:submersion/features/media/domain/entities/media_item.dart';
 import 'package:submersion/features/media/presentation/providers/species_media_providers.dart';
 import 'package:submersion/features/media/presentation/widgets/media_grid.dart';
 import 'package:submersion/l10n/arb/app_localizations.dart';
@@ -11,8 +12,17 @@ import 'package:submersion/shared/selection/selection_controller.dart';
 import 'package:submersion/shared/selection/selection_state.dart';
 import 'package:submersion/shared/widgets/app_bar_text_action.dart';
 
+/// What the picker pops: the photos chosen, not yet tagged (issue #4527,
+/// phase 3).
+class SpeciesTagChoice {
+  const SpeciesTagChoice(this.items);
+
+  final List<MediaItem> items;
+}
+
 /// Picks photos to tag with one species, from the dives where the diver
-/// logged it. Pops with the [TagPhotosResult] after tagging, or null.
+/// logged it. It tags nothing: it pops a [SpeciesTagChoice], or null, and
+/// the species page's sitting tags the choice at Save (issue #4527).
 ///
 /// The whole page is a picker, so every tile renders in selection mode and
 /// toggles on tap; one [SelectionController] keyed by media id spans the
@@ -20,7 +30,14 @@ import 'package:submersion/shared/widgets/app_bar_text_action.dart';
 class SpeciesTagPickerPage extends ConsumerStatefulWidget {
   final String speciesId;
 
-  const SpeciesTagPickerPage({super.key, required this.speciesId});
+  /// Photos the sitting already holds to tag, left out as tagged ones are.
+  final Set<String> alreadyChosen;
+
+  const SpeciesTagPickerPage({
+    super.key,
+    required this.speciesId,
+    this.alreadyChosen = const {},
+  });
 
   @override
   ConsumerState<SpeciesTagPickerPage> createState() =>
@@ -29,7 +46,6 @@ class SpeciesTagPickerPage extends ConsumerStatefulWidget {
 
 class _SpeciesTagPickerPageState extends ConsumerState<SpeciesTagPickerPage> {
   final SelectionController _selection = SelectionController();
-  bool _busy = false;
 
   @override
   void initState() {
@@ -46,9 +62,9 @@ class _SpeciesTagPickerPageState extends ConsumerState<SpeciesTagPickerPage> {
   @override
   Widget build(BuildContext context) {
     final l10n = context.l10n;
-    final groupsAsync = ref.watch(
-      speciesTagCandidatesProvider(widget.speciesId),
-    );
+    final groupsAsync = ref
+        .watch(speciesTagCandidatesProvider(widget.speciesId))
+        .whenData(_withoutChosen);
     final units = ref.watch(unitFormatterProvider);
     final allIds = [
       for (final group
@@ -124,7 +140,7 @@ class _SpeciesTagPickerPageState extends ConsumerState<SpeciesTagPickerPage> {
                     padding: const EdgeInsets.all(16),
                     child: FilledButton(
                       key: const ValueKey('tag_picker_confirm'),
-                      onPressed: checked.isEmpty || _busy
+                      onPressed: checked.isEmpty
                           ? null
                           : () => _confirm(checked.toList()),
                       child: Text(
@@ -138,16 +154,32 @@ class _SpeciesTagPickerPageState extends ConsumerState<SpeciesTagPickerPage> {
     );
   }
 
-  Future<void> _confirm(List<String> mediaIds) async {
-    setState(() => _busy = true);
-    try {
-      final result = await ref
-          .read(speciesTaggingServiceProvider)
-          .tagPhotos(mediaIds: mediaIds, speciesId: widget.speciesId);
-      if (mounted) Navigator.of(context).pop(result);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+  /// [groups] without the photos already chosen, and without a group left
+  /// empty by that.
+  List<SpeciesTagCandidateGroup> _withoutChosen(
+    List<SpeciesTagCandidateGroup> groups,
+  ) {
+    final chosen = widget.alreadyChosen;
+    if (chosen.isEmpty) return groups;
+    return [
+      for (final group in groups)
+        if (group.items.where((m) => !chosen.contains(m.id)).toList()
+            case final items when items.isNotEmpty)
+          group.copyWith(items: items),
+    ];
+  }
+
+  void _confirm(List<String> mediaIds) {
+    final groups = ref
+        .read(speciesTagCandidatesProvider(widget.speciesId))
+        .value;
+    final byId = {
+      for (final group in groups ?? const <SpeciesTagCandidateGroup>[])
+        for (final item in group.items) item.id: item,
+    };
+    Navigator.of(
+      context,
+    ).pop(SpeciesTagChoice([for (final id in mediaIds) ?byId[id]]));
   }
 }
 

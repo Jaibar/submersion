@@ -20,6 +20,34 @@ import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/forms/number_field.dart';
 import 'package:submersion/shared/widgets/forms/number_input_validation.dart';
 
+/// A cylinder's size as its field shows it: litres, or, for a diver in
+/// cubic feet, its rated gas capacity at [workingPressureBar], as the dive
+/// log and planner tank fields read. Blank for no size.
+String cylinderVolumeText(
+  UnitFormatter units,
+  double? liters,
+  double? workingPressureBar,
+) {
+  if (liters == null) return '';
+  return units.settings.volumeUnit == VolumeUnit.cubicFeet
+      ? formatRoundedForInput(ratedCapacityCuft(liters, workingPressureBar), 0)
+      // A small bottle keeps two decimals, as the tank editor does: a
+      // 0.85 L argon bottle must not read as 0.9 (issue #4243).
+      : formatRoundedForInput(
+          liters,
+          UnitFormatter.tankVolumeLiterDecimals(liters),
+        );
+}
+
+/// A cylinder's working pressure as its field shows it, in the diver's
+/// unit, whole. Blank for none.
+String cylinderPressureText(UnitFormatter units, double? bar) =>
+    bar == null ? '' : formatRoundedForInput(units.convertPressure(bar), 0);
+
+/// A gas fraction as the diver's locale writes it: 21 stays "21", 32.5
+/// becomes "32,5" for a comma-decimal diver (#1091).
+String cylinderShareText(double percent) => formatDecimalForInput(percent);
+
 /// One editable cylinder inside a configuration, laid out like the dive
 /// log's tank card (issue #3576): the label and gas name, then preset and
 /// role, size, then the mix.
@@ -124,31 +152,33 @@ class _CylinderConfigItemEditorState extends State<CylinderConfigItemEditor> {
   /// working pressure, as the dive log and planner tank fields do.
   bool get _isCuft => _units.settings.volumeUnit == VolumeUnit.cubicFeet;
 
-  /// A gas fraction as the diver's locale writes it: 21 stays "21", 32.5
-  /// becomes "32,5" for a comma-decimal diver (#1091).
-  static String _trim(double value) => formatDecimalForInput(value);
+  static String _trim(double value) => cylinderShareText(value);
 
-  String _volumeText(double? liters, double? workingPressureBar) {
-    if (liters == null) return '';
-    return _isCuft
-        ? formatRoundedForInput(
-            ratedCapacityCuft(liters, workingPressureBar),
-            0,
-          )
-        // A small bottle keeps two decimals, as the tank editor does: a
-        // 0.85 L argon bottle must not read as 0.9 (issue #4243).
-        : formatRoundedForInput(
-            liters,
-            UnitFormatter.tankVolumeLiterDecimals(liters),
-          );
-  }
+  String _volumeText(double? liters, double? workingPressureBar) =>
+      cylinderVolumeText(_units, liters, workingPressureBar);
 
-  String _pressureText(double? bar) =>
-      bar == null ? '' : formatRoundedForInput(_units.convertPressure(bar), 0);
+  String _pressureText(double? bar) => cylinderPressureText(_units, bar);
 
   GasMix get _gas => GasMix(o2: _item.o2Percent, he: _item.hePercent);
 
   void _emit(CylinderConfigItem item) => widget.onChanged(item);
+
+  /// Why [o2] and [he] cannot be this cylinder's mix, or null when they can
+  /// (issue #4714). The dive cylinders made from the configuration take it.
+  String? _mixError(double o2, double he) => GasMix(o2: o2, he: he).isPossible
+      ? null
+      : context.l10n.diveLog_tank_error_impossibleMix;
+
+  /// The share [field] spells out, or [stored] while it reads as no number.
+  /// Each gas field checks and emits against the other field's text, not
+  /// the model: a share the model refused (say O2 50 beside He 60) is still
+  /// on screen, and pairing the other field with the model's older value
+  /// would emit a mix the fields do not show.
+  static double _typedShare(TextEditingController field, double stored) =>
+      switch (readNumber(field.text)) {
+        NumberValue(:final value) => value,
+        _ => stored,
+      };
 
   // ---------------------------------------------------------------- size
 
@@ -448,12 +478,20 @@ class _CylinderConfigItemEditorState extends State<CylinderConfigItemEditor> {
                       suffixText: '%',
                       isDense: true,
                     ),
+                    check: (o2) =>
+                        _mixError(o2, _typedShare(_he, item.hePercent)),
                     // Only a readable value updates the model: blank, and
                     // transient or mistyped text such as a lone ".", must
-                    // not clobber the stored mix; the field says why.
+                    // not clobber the stored mix; the field says why. So
+                    // must a mix no gas can have, such as 1000% (#4714).
                     onChanged: (read) {
                       if (read case NumberValue(:final value)) {
-                        _emitOnLimit(item.copyWith(o2Percent: value));
+                        final he = _typedShare(_he, item.hePercent);
+                        if (_mixError(value, he) == null) {
+                          _emitOnLimit(
+                            item.copyWith(o2Percent: value, hePercent: he),
+                          );
+                        }
                       }
                     },
                   ),
@@ -467,9 +505,18 @@ class _CylinderConfigItemEditorState extends State<CylinderConfigItemEditor> {
                       suffixText: '%',
                       isDense: true,
                     ),
+                    check: (he) =>
+                        _mixError(_typedShare(_o2, item.o2Percent), he),
                     onChanged: (read) {
                       if (read case NumberValue(:final value)) {
-                        _emit(item.copyWith(hePercent: value));
+                        final o2 = _typedShare(_o2, item.o2Percent);
+                        if (_mixError(o2, value) == null) {
+                          // On the MOD's limit, as an O2 edit is: the O2
+                          // the field held back may land with this one.
+                          _emitOnLimit(
+                            item.copyWith(o2Percent: o2, hePercent: value),
+                          );
+                        }
                       }
                     },
                   ),

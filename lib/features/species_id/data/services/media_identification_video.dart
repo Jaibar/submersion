@@ -16,18 +16,23 @@ extension _VideoScanning on MediaIdentificationService {
     required int? cell,
     required bool cropsPresent,
     required bool embeddingsPresent,
+    required bool madeHere,
     required int generation,
   }) async {
     final manifest = pack.pack.manifest;
-    final action = decideVideoRefresh(
-      run: run,
-      packVersion: manifest.packVersion,
-      detectorId: manifest.detectorSetId,
-      classifierId: manifest.classifier.embeddingId,
-      cell: cell,
-      cropsPresent: cropsPresent,
-      embeddingsPresent: embeddingsPresent,
-    );
+    // A fresh request scans from the start whatever the video needs.
+    final action = job.fresh
+        ? VideoRefreshAction.rescan
+        : decideVideoRefresh(
+            run: run,
+            packVersion: manifest.packVersion,
+            detectorId: _runDetectorId(manifest, video: true),
+            classifierId: manifest.classifier.embeddingId,
+            cell: cell,
+            cropsPresent: cropsPresent,
+            embeddingsPresent: embeddingsPresent,
+            madeHere: madeHere,
+          );
     switch (action) {
       case VideoRefreshAction.none:
         return false;
@@ -35,8 +40,11 @@ extension _VideoScanning on MediaIdentificationService {
         await _rename(pack, run!, undecided, embeddings, cell, generation);
         return false;
       case VideoRefreshAction.resume:
-        final reader = await _resolveVideo(job.item);
-        if (reader == null) return false;
+        final reader = await (job.resolveVideo ?? _resolveVideo)(job.item);
+        if (reader == null) {
+          job.outcome = RunItemOutcome.unreadable;
+          return false;
+        }
         var from = run!;
         final moved =
             from.packVersion != manifest.packVersion ||
@@ -49,40 +57,43 @@ extension _VideoScanning on MediaIdentificationService {
         }
         // A rescan stopped part-way: what the diver said about a fish not
         // yet reached is still to be carried to its fresh track (rows this
-        // scan stored end at or before where it got to).
-        final scanned = from.scannedMs ?? 0;
+        // scan stored lie inside the stretches it scanned).
+        final scanned = from.scanned;
         final ahead = [
           for (final i in now)
-            if (_saidByDiver(i) && (i.endMs ?? 0) > scanned) i,
+            if (i.saidByDiver &&
+                !scanned.coversRange(i.startMs ?? 0, i.endMs ?? 0))
+              i,
         ];
-        return _scanVideo(
-          job,
-          pack,
-          cell,
-          reader,
-          from,
-          generation,
-          ahead,
-          stored: now,
-        );
+        return _scanVideo(job, pack, cell, reader, from, generation, ahead);
       case VideoRefreshAction.rescan:
-        final reader = await _resolveVideo(job.item);
-        if (reader == null) return false;
+        final reader = await (job.resolveVideo ?? _resolveVideo)(job.item);
+        if (reader == null) {
+          job.outcome = RunItemOutcome.unreadable;
+          return false;
+        }
+        // Dismissals come back only for a video that is looked at again.
+        var rows = stored;
+        if (job.fresh) {
+          final reopened = await _reopen(job, stored);
+          if (reopened == null) return false;
+          rows = reopened;
+        }
         // What the diver said about a fish (a decision, or a claim from
         // the frame) is carried to the fresh track of the same fish; the
         // app's own guesses are found again.
         final carry = [
-          for (final i in stored)
-            if (_saidByDiver(i)) i,
+          for (final i in rows)
+            if (i.saidByDiver) i,
         ];
         final dropped = [
-          for (final i in stored)
+          for (final i in rows)
             if (!carry.contains(i)) i.id,
         ];
         final start = MediaIdentificationRun(
           mediaId: job.item.id,
           packVersion: manifest.packVersion,
-          detectorId: manifest.detectorSetId,
+          detectorId: videoRunDetectorId(manifest.detectorSetId),
           classifierId: manifest.classifier.embeddingId,
           locationCell: cell,
           analysedAt: _now().toUtc(),
@@ -90,6 +101,13 @@ extension _VideoScanning on MediaIdentificationService {
           imageHeight: run?.imageHeight ?? 0,
           detectionCount: carry.length,
           scannedMs: 0,
+          // Known already: the analysed stretches show from the start.
+          videoDurationMs: run?.videoDurationMs,
+          // A scan from the start is a new run here (issue #4876); its
+          // later chunks keep this id.
+          analysedBy: await _deviceId(),
+          runId: _newRunId(),
+          namingBars: NamingBars.fromNaming(manifest.naming),
         );
         if (_databaseGeneration() != generation) return false;
         await _identifications.storeRun(
@@ -99,6 +117,8 @@ extension _VideoScanning on MediaIdentificationService {
         );
         await _embeddings.delete(dropped);
         await _crops.delete(job.item.id, dropped);
+        // From here a job put back carries on rather than starting over.
+        job.freshStarted();
         return _scanVideo(job, pack, cell, reader, start, generation, carry);
     }
   }
@@ -108,10 +128,10 @@ extension _VideoScanning on MediaIdentificationService {
   /// what was found for the new place, rather than stopping the scan.
   bool _otherWaiting(_Job job) => _waiting.keys.any((id) => id != job.item.id);
 
-  /// Whether the diver decided on [i], or named it from the frame.
-  static bool _saidByDiver(MediaIdentification i) =>
-      i.decision != IdentificationDecision.undecided ||
-      i.claimedSpeciesId != null;
+  /// Whether the diver asked for this same video again from the start
+  /// (issue #4825): the scan under way gives way to it.
+  bool _freshWaiting(_Job job) =>
+      (job.fromRun ? _runWaiting : _waiting)[job.item.id]?.fresh ?? false;
 
   /// Scans [job]'s video a chunk at a time from [from]. Between chunks it
   /// stops when the video was left, another logbook opened, a pack change
@@ -124,9 +144,8 @@ extension _VideoScanning on MediaIdentificationService {
     VideoFileReader reader,
     MediaIdentificationRun from,
     int generation,
-    List<MediaIdentification> carry, {
-    List<MediaIdentification> stored = const [],
-  }) async {
+    List<MediaIdentification> carry,
+  ) async {
     // One worker holds the candidate table for the whole scan; without it
     // each chunk's naming copies the table into a new isolate.
     CropNamingWorker? worker;
@@ -151,24 +170,30 @@ extension _VideoScanning on MediaIdentificationService {
       generation: generation,
       resumeFrom: from,
       carry: carry,
-      stored: stored,
+      playhead: () => _playheads[job.item.id],
+      onFollowed: (sequence) => _followedPlayheads[job.item.id] = sequence,
+      firstChunkMs: _firstVideoChunkMs,
       reload: () async {
         _loadedModels = null;
         await _ensureLoaded(pack);
       },
       memoryReadout: _memoryReadout,
       keepGoing: () =>
-          !job.cancelled &&
+          !job.stopForLeaving() &&
           !_disposed &&
           _paused == 0 &&
           !_otherWaiting(job) &&
+          !_freshWaiting(job) &&
           _databaseGeneration() == generation,
     );
     _videoProgress = scan.progress;
     _changed();
     try {
       while (true) {
-        if (job.cancelled || _disposed || _databaseGeneration() != generation) {
+        if (job.stopForLeaving() ||
+            _disposed ||
+            _freshWaiting(job) ||
+            _databaseGeneration() != generation) {
           await scan.finish();
           return false;
         }
@@ -193,6 +218,9 @@ extension _VideoScanning on MediaIdentificationService {
               _databaseGeneration() == generation &&
               (_paused > 0 || _otherWaiting(job));
         }
+        // The chip row and sheet agree with the labels, which reconcile in
+        // memory, while the scan is still running (issue #4709).
+        await reconcile(job.item.id);
         _videoProgress = scan.progress;
         _changed();
         if (!more) {
@@ -206,6 +234,7 @@ extension _VideoScanning on MediaIdentificationService {
       // In the background, too hot, or a failure: what was stored stays,
       // and the next opening carries on from it.
       _log.debug('Video scan of ${job.item.id} stopped', error: e);
+      job.outcome = runOutcomeOf(e);
       try {
         await scan.finish();
       } on Object {

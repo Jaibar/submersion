@@ -48,6 +48,12 @@ class SiteEditSaveService {
   /// writes changed (a site's features, its types): they write without
   /// stamping, since the stamp goes to the shared library store, which a
   /// rollback would not undo, and are stamped here instead.
+  ///
+  /// [privateOnly] saves a library reader's own changes (issue #4527, plan
+  /// 5): the right to edit is not asked, and only the site's private notes
+  /// and rating are taken from [apply], so no field of the library's site
+  /// changes whatever the sitting holds. A site in no library is refused
+  /// ([SiteEditRefused]): there notes and rating are the site's own.
   Future<({DiveSite before, DiveSite after})?> save({
     required String siteId,
     required DiveSite Function(DiveSite stored) apply,
@@ -57,6 +63,7 @@ class SiteEditSaveService {
     Future<void> Function()? alsoWrite,
     bool alsoWriteIsAChange = false,
     Set<String> Function()? heldLibraryFields,
+    bool privateOnly = false,
   }) =>
       // Sync hears of the save once, after its stamps: the notices of the
       // writes inside it, sent as its transaction commits, are held too.
@@ -74,12 +81,19 @@ class SiteEditSaveService {
           // row kept to the private fields while the held writes went
           // through. Nothing is written instead.
           read: () async {
-            if (!await _stamper.mayEdit(siteId, actingDiverId: actingDiverId)) {
+            if (!privateOnly &&
+                !await _stamper.mayEdit(siteId, actingDiverId: actingDiverId)) {
               throw SiteEditRefused(siteId);
             }
-            return _sites.getSiteById(siteId);
+            final site = await _sites.getSiteById(siteId);
+            // Notes and rating are a member's own only on a library site;
+            // anywhere else they are the site's, and asked for as any field.
+            if (privateOnly && site != null && !site.isLibrarySite) {
+              throw SiteEditRefused(siteId);
+            }
+            return site;
           },
-          apply: apply,
+          apply: privateOnly ? (stored) => _privateOf(stored, apply) : apply,
           // A library site's stamp goes to the shared library store, which a
           // rollback would not undo: it waits for the commit, below.
           write: (_, merged) async {
@@ -117,6 +131,50 @@ class SiteEditSaveService {
         SyncEventBus.notifyLocalChange();
         return result;
       });
+
+  /// Creates [site], a new site's sitting (issue #4527, phase 2, plan 6),
+  /// keeping its id: the row, then [alsoWrite], the sitting's held writes,
+  /// which all point at it, in one transaction and one change log operation
+  /// naming [changedCardIds]. If any of them throws nothing is left. Returns
+  /// the site as stored at the end. Throws [StateError] when [site] has no
+  /// id, or one a stored site already has.
+  Future<DiveSite> create({
+    required DiveSite site,
+    required Iterable<String> changedCardIds,
+    Future<void> Function()? alsoWrite,
+  }) {
+    if (site.id.isEmpty) {
+      return Future.error(
+        StateError('A new site needs its id before it is created'),
+      );
+    }
+    return runRecordSitting(
+      table: 'dive_sites',
+      recordId: site.id,
+      changedCardIds: changedCardIds,
+      body: () async {
+        if (await _sites.getSiteById(site.id) != null) {
+          throw StateError('Site ${site.id} already exists');
+        }
+        final created = await _sites.createSite(site);
+        await alsoWrite?.call();
+        return await _sites.getSiteById(created.id) ?? created;
+      },
+    );
+  }
+
+  /// [stored] with only the private notes and rating [apply] gives it.
+  static DiveSite _privateOf(
+    DiveSite stored,
+    DiveSite Function(DiveSite stored) apply,
+  ) {
+    final merged = apply(stored);
+    return stored.copyWith(
+      notes: merged.notes,
+      rating: merged.rating,
+      clearRating: merged.rating == null,
+    );
+  }
 
   /// Stamps the library fields the sitting's held writes changed, once the
   /// sitting has committed. Best effort, as the row's own stamp.

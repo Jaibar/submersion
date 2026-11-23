@@ -36,6 +36,7 @@ import 'package:submersion/features/media/domain/entities/media_source_type.dart
 import 'package:submersion/features/media/presentation/helpers/elapsed_time_format.dart';
 import 'package:submersion/features/media/presentation/helpers/media_share_helper.dart';
 import 'package:submersion/features/media/presentation/helpers/set_time_seed.dart';
+import 'package:submersion/features/media/presentation/helpers/viewer_audio.dart';
 import 'package:submersion/features/media/presentation/providers/lightroom_providers.dart';
 import 'package:submersion/features/media/presentation/providers/media_providers.dart';
 import 'package:submersion/features/media/presentation/providers/resolved_asset_providers.dart';
@@ -50,16 +51,19 @@ import 'package:submersion/features/media/presentation/widgets/media_info_sheet.
 import 'package:submersion/features/media/presentation/widgets/media_species_chips_row.dart';
 import 'package:submersion/features/media/presentation/widgets/media_species_sheet.dart';
 import 'package:submersion/features/media/domain/entities/media_person_tag.dart';
+import 'package:submersion/features/media/domain/services/media_location.dart';
 import 'package:submersion/features/media/presentation/widgets/people_tags/face_box_layer.dart';
 import 'package:submersion/features/media/presentation/widgets/people_tags/media_people_chips_row.dart';
 import 'package:submersion/features/media/presentation/widgets/people_tags/people_tag_editor.dart';
 import 'package:submersion/features/media/presentation/widgets/people_tags/people_tag_viewer_mixin.dart';
 import 'package:submersion/features/media/presentation/widgets/people_tags/video_people_layer.dart';
 import 'package:submersion/features/media/presentation/widgets/media_viewer_caption.dart';
+import 'package:submersion/features/media/presentation/widgets/media_species_list_sheet.dart';
 import 'package:submersion/features/media/presentation/widgets/media_viewer_toolbar.dart';
 import 'package:submersion/features/media/presentation/widgets/video_color_filter.dart';
 import 'package:submersion/features/media/presentation/widgets/video_controls_auto_hide.dart';
 import 'package:submersion/features/media/presentation/widgets/video_controls_bar.dart';
+import 'package:submersion/shared/widgets/size_reporter.dart';
 import 'package:submersion/features/media/presentation/helpers/color_pick_white.dart';
 import 'package:submersion/features/media/presentation/widgets/color_adjust/color_adjust_viewer_mixin.dart';
 import 'package:submersion/features/media/presentation/widgets/color_adjust/pick_white_hint.dart';
@@ -73,8 +77,12 @@ import 'package:submersion/features/settings/presentation/providers/settings_pro
 import 'package:submersion/l10n/l10n_extension.dart';
 import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
 import 'package:submersion/features/media/presentation/match_confidence_display.dart';
+import 'package:submersion/features/species_id/presentation/widgets/identification_labels.dart';
 import 'package:submersion/features/species_id/presentation/widgets/identification_trigger.dart';
+import 'package:submersion/features/species_id/presentation/widgets/labels_menu.dart';
+import 'package:submersion/features/species_id/presentation/widgets/photo_identification_layer.dart';
 import 'package:submersion/features/species_id/presentation/widgets/video_identification_layer.dart';
+import 'package:submersion/features/species_id/presentation/widgets/video_playhead_reporter.dart';
 
 part 'media_viewer_actions.dart';
 part 'media_viewer_bottom_metadata.dart';
@@ -167,6 +175,22 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
 
   bool _showOverlay = true;
 
+  /// The bottom panel's height as last laid out, which the fish labels on
+  /// a video keep above (issue #4762), and an unlocked photo's (#4825).
+  double _bottomPanelHeight = 0;
+
+  /// The bottom panel was laid out at [height]. A video's fish labels read
+  /// it, and an unlocked photo's; a locked photo's panel just records it,
+  /// without a rebuild, and the unlock reads it.
+  void _onBottomPanelHeight(double height, {required bool video}) {
+    if (!mounted || height == _bottomPanelHeight) return;
+    if (!video && photoLocked) {
+      _bottomPanelHeight = height;
+      return;
+    }
+    setState(() => _bottomPanelHeight = height);
+  }
+
   @override
   bool get videoOverlayShown => _showOverlay;
 
@@ -181,6 +205,9 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
   /// the Perdix overlay (mounted at page level) can follow playback. Entries
   /// come and go as gallery pages initialize/dispose.
   final Map<String, VideoPlayerController> _videoControllers = {};
+
+  /// The videos' sound, muted on open, for as long as the viewer is (#4817).
+  final _audio = ViewerAudio();
 
   void _onVideoControllerChanged(
     String mediaId,
@@ -250,6 +277,7 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
   void dispose() {
     disposePhotoEditing();
     _pageController.dispose();
+    _audio.dispose();
     // Restore system UI
     SystemChrome.setEnabledSystemUIMode(
       SystemUiMode.edgeToEdge,
@@ -462,6 +490,16 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                 pauseVideo: (id) => unawaited(_videoControllers[id]?.pause()),
               );
 
+              // The bottom panel, a video's scrub bar its top row so no tag
+              // can cover it (issue #4762).
+              final panelShown =
+                  (_showOverlay || photoUnlocked) &&
+                  !isFullscreen &&
+                  !pickingWhite &&
+                  !taggingPeople;
+              final miniProfileShown =
+                  diveProfile != null && diveProfile.isNotEmpty && positioned;
+
               final viewer = GestureDetector(
                 // Swipe down to close (common pattern for fullscreen viewers)
                 onVerticalDragEnd: (details) {
@@ -472,7 +510,6 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                 },
                 child: Stack(
                   children: [
-                    // Photo/video gallery
                     RepaintBoundary(
                       key: galleryBoundaryKey,
                       child: _PhotoGallery(
@@ -505,15 +542,16 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                         onSetOverlay: _onSetOverlay,
                         onVideoHoldChanged: videoHoldChanged,
                         onVideoControllerChanged: _onVideoControllerChanged,
+                        audio: _audio,
                         currentIndex: currentIndex,
                         people: peopleSession,
                         identificationsEditable: !photoLocked,
                         hideIdentifications: pickingWhite,
+                        videoControlsInset: panelShown ? _bottomPanelHeight : 0,
                       ),
                     ),
 
-                    // Transparent tap target to toggle overlays (photos only)
-                    // Videos handle their own tap gestures for play/pause
+                    // A photo's tap layer; a video takes its own taps.
                     if (!currentItem.isVideo)
                       Positioned.fill(
                         child: Semantics(
@@ -521,23 +559,21 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                               context.l10n.media_photoViewer_toggleOverlayLabel,
                           child: GestureDetector(
                             behavior: HitTestBehavior.translucent,
-                            onTap: pickingWhite || taggingPeople
+                            onTapUp: taggingPeople && !pickingWhite
                                 ? null
-                                : isFullscreen
-                                ? toggleFullscreenControls
-                                : () {
-                                    cancelVideoOverlayClock();
-                                    setState(
-                                      () => _showOverlay = !_showOverlay,
-                                    );
-                                  },
-                            onTapUp: pickingWhite
-                                ? (details) => _pickWhiteAt(
+                                : _photoTapUp(
                                     currentItem,
-                                    details.localPosition,
-                                    context.size ?? Size.zero,
-                                  )
-                                : null,
+                                    () => context.size ?? Size.zero,
+                                    isFullscreen
+                                        ? toggleFullscreenControls
+                                        : () {
+                                            cancelVideoOverlayClock();
+                                            setState(
+                                              () =>
+                                                  _showOverlay = !_showOverlay,
+                                            );
+                                          },
+                                  ),
                             child: const SizedBox.expand(),
                           ),
                         ),
@@ -568,9 +604,8 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                       location: _photoLocation(currentItem, diveAsync.value),
                     ),
 
-                    // Overlay controls (app bar and metadata)
-                    // While unlocked the bar never hides: it holds Cancel and
-                    // Save.
+                    // The controls; while unlocked the bar never hides: it
+                    // holds Cancel and Save.
                     if ((_showOverlay || photoUnlocked) &&
                         !isFullscreen &&
                         !pickingWhite) ...[
@@ -585,6 +620,7 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                         perdixToggleAvailable: perdixToggleAvailable,
                         perdixEnabled: settings.perdixOverlayEnabled,
                         storedPhoto: storedPhoto,
+                        location: _photoLocation(currentItem, diveAsync.value),
                       ),
 
                       // What colour correction the item is drawn with.
@@ -633,35 +669,17 @@ class _MediaViewerPageState extends ConsumerState<MediaViewerPage>
                           ),
 
                         // Bottom metadata
-                        _BottomMetadataOverlay(
+                        _bottomPanel(
+                          context,
                           item: currentItem,
                           settings: units.settings,
-                          onMomentTap: (tag) => _showMoment(currentItem, tag),
-                          sitting: photoSitting,
-                          onSuggestionTap: photoSitting == null
-                              ? null
-                              : () {
-                                  // Read at the tap, as Tag species does.
-                                  final sitting = photoSitting;
-                                  if (sitting == null) return;
-                                  showMediaSpeciesSheet(
-                                    context,
-                                    currentItem,
-                                    sitting: sitting,
-                                  );
-                                },
-                          profileLengthSeconds: profileLength,
-                          // Pinning needs a profile to pin against; a dive with
-                          // none has no moments to choose from.
-                          onSetTime:
-                              diveProfile == null ||
-                                  diveProfile.isEmpty ||
-                                  photoLocked
-                              ? null
-                              : () => _setTimeInDive(currentItem, diveProfile),
+                          diveProfile: diveProfile,
+                          profileLength: profileLength,
+                          photoLocked: photoLocked,
                           siteName: diveAsync.whenOrNull(
                             data: (dive) => dive?.site?.name,
                           ),
+                          miniProfileShown: miniProfileShown,
                         ),
                       ],
                     ],

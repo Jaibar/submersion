@@ -11,6 +11,7 @@ import 'package:submersion/core/providers/provider.dart';
 import 'package:submersion/features/media/data/services/document_import_service.dart';
 import 'package:submersion/features/media/data/services/media_share_temp_file.dart';
 import 'package:submersion/features/media/domain/entities/media_item.dart';
+import 'package:submersion/features/media/presentation/pages/attachment_details_page.dart';
 import 'package:submersion/features/media/presentation/pages/document_viewer_page.dart';
 import 'package:submersion/features/media/presentation/providers/media_bytes_providers.dart';
 import 'package:submersion/features/media/presentation/providers/media_providers.dart';
@@ -28,9 +29,9 @@ class DocumentOpenHelper {
   /// Route a tapped document: PDFs to the in-app viewer, everything else
   /// to the platform (desktop-open vs mobile-share duality).
   ///
-  /// [editableSiteId] names the site a PDF is attached to when its viewer
-  /// may offer Edit details (issue #1039); dive and equipment callers leave
-  /// it null.
+  /// [editableSiteId] names the site a document is attached to, whose
+  /// details (issue #1039) are then edited under the attachment's own lock
+  /// (issue #4527); dive and equipment callers leave it null.
   static Future<void> open(
     BuildContext context,
     WidgetRef ref,
@@ -47,7 +48,58 @@ class DocumentOpenHelper {
       );
       return;
     }
+    // A document with no viewer opens its details, under the lock.
+    if (editableSiteId != null) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) =>
+              AttachmentDetailsPage(item: item, siteId: editableSiteId),
+        ),
+      );
+      return;
+    }
     await openExternally(context, ref, item);
+  }
+
+  /// Shares [item]'s file through the platform share sheet, anchored on
+  /// iPad to the button whose [buttonContext] is given; says so when the
+  /// file cannot be produced on this device, or the share fails.
+  static Future<void> share(
+    BuildContext buttonContext,
+    WidgetRef ref,
+    MediaItem item,
+  ) async {
+    if (!demoSealGuard(buttonContext, DemoSealedFeature.share)) {
+      return;
+    }
+    final l10n = buttonContext.l10n;
+    // Resolved before the awaits below: the button is guaranteed mounted now.
+    final anchor = shareAnchorFrom(buttonContext);
+    try {
+      final resolved = await ref.read(mediaBytesProvider(item).future);
+      if (resolved.isUnavailable || resolved.bytes == null) {
+        if (buttonContext.mounted) {
+          ScaffoldMessenger.of(buttonContext).showSnackBar(
+            SnackBar(content: Text(l10n.media_photoViewer_cannotShare)),
+          );
+        }
+        return;
+      }
+      final file = await writeShareTempFile(item, resolved.bytes!);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: item.shareMimeType)],
+          sharePositionOrigin: anchor,
+        ),
+      );
+    } catch (e) {
+      if (buttonContext.mounted) {
+        ScaffoldMessenger.of(buttonContext).showSnackBar(
+          SnackBar(content: Text(l10n.media_photoViewer_failedToShare('$e'))),
+        );
+      }
+    }
   }
 
   // coverage:ignore-start

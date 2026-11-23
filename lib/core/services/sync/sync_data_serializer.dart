@@ -23,6 +23,9 @@ import 'package:submersion/core/database/tag_scope_tables.dart';
 import 'package:submersion/core/database/trip_checklist_default.dart';
 import 'package:submersion/core/services/sync/child_column_clears.dart';
 import 'package:submersion/core/services/sync/device_local_fields.dart';
+import 'package:submersion/core/services/sync/held_reference_schema.dart';
+import 'package:submersion/core/services/sync/held_reference_store.dart';
+import 'package:submersion/core/services/sync/held_references.dart';
 import 'package:submersion/core/services/sync/legacy_wire_keys.dart';
 import 'package:submersion/core/services/sync/sync_fact_groups.dart';
 import 'package:submersion/core/services/sync/sync_json_weight.dart';
@@ -416,6 +419,13 @@ class SyncData {
 
   /// People tagged on photos and videos (v326, issue #1745).
   final List<Map<String, dynamic>> mediaPeople;
+
+  /// Marine life results (v381, issue #4876): a run per analysed media, the
+  /// animals it found with the diver's decisions, and the crops of named
+  /// ones.
+  final List<Map<String, dynamic>> mediaIdentificationRuns;
+  final List<Map<String, dynamic>> mediaIdentifications;
+  final List<Map<String, dynamic>> mediaIdentificationCrops;
   final List<Map<String, dynamic>> siteFeatures;
   final List<Map<String, dynamic>> csvPresets;
   final List<Map<String, dynamic>> viewConfigs;
@@ -557,6 +567,9 @@ class SyncData {
     this.librarySiteNotes = const [],
     this.mediaSpecies = const [],
     this.mediaPeople = const [],
+    this.mediaIdentificationRuns = const [],
+    this.mediaIdentifications = const [],
+    this.mediaIdentificationCrops = const [],
     this.siteFeatures = const [],
     this.csvPresets = const [],
     this.viewConfigs = const [],
@@ -697,6 +710,9 @@ class SyncData {
     'librarySiteNotes': librarySiteNotes,
     'mediaSpecies': mediaSpecies,
     'mediaPeople': mediaPeople,
+    'mediaIdentificationRuns': mediaIdentificationRuns,
+    'mediaIdentifications': mediaIdentifications,
+    'mediaIdentificationCrops': mediaIdentificationCrops,
     'siteFeatures': siteFeatures,
     'csvPresets': csvPresets,
     'viewConfigs': viewConfigs,
@@ -856,6 +872,9 @@ class SyncData {
       librarySiteNotes: _parseList(json['librarySiteNotes']),
       mediaSpecies: _parseList(json['mediaSpecies']),
       mediaPeople: _parseList(json['mediaPeople']),
+      mediaIdentificationRuns: _parseList(json['mediaIdentificationRuns']),
+      mediaIdentifications: _parseList(json['mediaIdentifications']),
+      mediaIdentificationCrops: _parseList(json['mediaIdentificationCrops']),
       siteFeatures: _parseList(json['siteFeatures']),
       csvPresets: _parseList(json['csvPresets']),
       viewConfigs: _parseList(json['viewConfigs']),
@@ -946,7 +965,7 @@ class SyncDataSerializer {
   /// BEFORE the upsert overwrites the stored rows.
   ///
   /// A trim or split made on this device evicts its own cached LODs
-  /// (trimTrackProvider, splitTrackProvider); one arriving from a peer only
+  /// (evictGpsTrackProvider, splitTrackProvider); one arriving from a peer only
   /// overwrites the row, and the cache has no TTL, so without this the map
   /// kept drawing the pre-trim polyline for good (issue #2447). Only a stored
   /// row that draws exactly like the incoming one proves the cache still
@@ -1610,6 +1629,26 @@ class SyncDataSerializer {
     ),
     (key: 'mediaSpecies', table: _db.mediaSpecies, blob: false, full: null),
     (key: 'mediaPeople', table: _db.mediaPeople, blob: false, full: null),
+    (
+      // PK is media_id, not id, so the keyset pager can't stream it; a run
+      // is small (its scanned stretches at most), one per analysed media.
+      key: 'mediaIdentificationRuns',
+      table: null,
+      blob: false,
+      full: () => _exportMediaIdentificationRuns(null),
+    ),
+    (
+      key: 'mediaIdentifications',
+      table: _db.mediaIdentifications,
+      blob: true,
+      full: null,
+    ),
+    (
+      key: 'mediaIdentificationCrops',
+      table: _db.mediaIdentificationCrops,
+      blob: true,
+      full: null,
+    ),
     (key: 'siteFeatures', table: _db.siteFeatures, blob: false, full: null),
     (key: 'csvPresets', table: _db.csvPresets, blob: false, full: null),
     (key: 'viewConfigs', table: _db.viewConfigs, blob: false, full: null),
@@ -1834,6 +1873,12 @@ class SyncDataSerializer {
       final tables = _baseTables;
       // Library sites and their children stay out of the base (issue #2567).
       final librarySites = await librarySiteIds();
+      // A link this device still holds goes out as the value it held (issue
+      // #4954), never as the repair's null.
+      final heldLinks = await HeldReferenceStore(
+        _db,
+        entityTypeOf: _entityTypeForTable,
+      ).exportFilter();
       for (var t = 0; t < tables.length; t++) {
         final spec = tables[t];
         if (t > 0) await writeData(',');
@@ -1848,6 +1893,8 @@ class SyncDataSerializer {
         final factClockKeys = [
           for (final g in SyncFactGroups.of(spec.key)) g.clockKey,
         ];
+
+        final heldTable = heldLinks.isEmpty ? null : _tableNameFor(spec.key);
 
         Future<void> emit(Map<String, dynamic> row) async {
           if (librarySites.isNotEmpty) {
@@ -1871,7 +1918,11 @@ class SyncDataSerializer {
           }
           // Device-local columns never leave this device, in a base as in a
           // changeset (issue #2947).
-          await writeData(jsonEncode(withoutDeviceLocalColumns(spec.key, row)));
+          final local = withoutDeviceLocalColumns(spec.key, row);
+          final wire = heldTable == null
+              ? local
+              : heldLinks.withHeldValues(heldTable, local);
+          await writeData(jsonEncode(wire));
         }
 
         if (spec.table != null) {
@@ -2100,6 +2151,9 @@ class SyncDataSerializer {
     'mediaEnrichment',
     'mediaSpecies',
     'mediaPeople',
+    'mediaIdentificationRuns',
+    'mediaIdentifications',
+    'mediaIdentificationCrops',
     'mediaStores',
     'species',
     'importedFiles',
@@ -2182,25 +2236,62 @@ class SyncDataSerializer {
   /// whichever database is open.
   final Map<String, Map<String, String>> _clearableChildColumns = {};
 
+  /// Clock-guarded types whose explicit nulls land the way a parent-gated
+  /// child's do (#2644): applied with the same blind upsert, which drops
+  /// nulls, so a deliberate clear needs [clearChildColumns] too. A species
+  /// tag the app applied is confirmed by clearing its marks to null (issue
+  /// #4727); without this the confirm would never reach a peer.
+  static const Map<String, String> clockGuardedClearTables = {
+    'mediaSpecies': 'media_species',
+    // A rescan from the start sets a video's scan back to nothing, and a
+    // run named again with no place clears its cell (issue #4876).
+    'mediaIdentificationRuns': 'media_identification_runs',
+  };
+
+  /// The only JSON keys a clock-guarded type's copy may clear: the marks a
+  /// confirm clears. Its other nullable columns (a tag's notes, box and
+  /// sighting) keep the blind upsert's rule, so a newer copy that simply
+  /// lacks them never erases what this device holds.
+  static const Map<String, Set<String>> clockGuardedClearKeys = {
+    'mediaSpecies': {'unconfirmed', 'createdSighting', 'createdSpecies'},
+    'mediaIdentificationRuns': {
+      'scannedMs',
+      'videoDurationMs',
+      'scannedRanges',
+      'locationCell',
+    },
+  };
+
+  /// The SQL table [clearChildColumns] writes for [entityType], or null for
+  /// a type whose clears it does not handle.
+  static String? clearTableFor(String entityType) =>
+      parentGatedTables[entityType] ?? clockGuardedClearTables[entityType];
+
   TableInfo<Table, Object?> _parentGatedTable(String entityType) {
-    final tableName = parentGatedTables[entityType]!;
+    final tableName = clearTableFor(entityType)!;
     return _db.allTables.firstWhere((t) => t.actualTableName == tableName);
   }
 
   Map<String, String> _clearableFor(String entityType) =>
-      _clearableChildColumns.putIfAbsent(
-        entityType,
-        () => clearableColumns(
+      _clearableChildColumns.putIfAbsent(entityType, () {
+        final all = clearableColumns(
           _parentGatedTable(entityType),
           keyColumns: _parentGatedKeyColumns[entityType] ?? const ['id'],
-        ),
-      );
+        );
+        final allowed = clockGuardedClearKeys[entityType];
+        return allowed == null
+            ? all
+            : {
+                for (final e in all.entries)
+                  if (allowed.contains(e.key)) e.key: e.value,
+              };
+      });
 
   /// The JSON keys a clear on [entityType] may name (see clearableColumns):
   /// empty for a type outside [parentGatedChildEntities] or one with nothing
   /// clearable, so a caller can skip collecting clears for it (#2644).
   Iterable<String> clearableChildKeys(String entityType) =>
-      parentGatedTables.containsKey(entityType)
+      clearTableFor(entityType) != null
       ? _clearableFor(entityType).keys
       : const [];
 
@@ -2226,7 +2317,7 @@ class SyncDataSerializer {
     String entityType,
     Map<String, Set<String>> clears,
   ) async {
-    final tableName = parentGatedTables[entityType];
+    final tableName = clearTableFor(entityType);
     if (tableName == null || clears.isEmpty) return;
     final table = _parentGatedTable(entityType);
     final keys = _parentGatedKeyColumns[entityType] ?? const ['id'];
@@ -2337,6 +2428,8 @@ class SyncDataSerializer {
     'divePlanEquipment': ['plan_id', 'equipment_id'],
     'equipmentSetItems': ['set_id', 'equipment_id'],
     'diveSafetyReviews': ['dive_id'],
+    // Clock-guarded, not parent-gated: listed for its clears (issue #4876).
+    'mediaIdentificationRuns': ['media_id'],
   };
 
   /// [ids] of a [parentGatedChildEntities] type in one query (per chunk the
@@ -2482,12 +2575,65 @@ class SyncDataSerializer {
   Future<SyncData> _buildSyncData(
     String? hlcSince, {
     bool childrenByOwnClock = false,
-  }) => _withLibrarySiteIdsMemo(
-    () => _buildSyncDataUnmemoised(
-      hlcSince,
-      childrenByOwnClock: childrenByOwnClock,
+  }) async => _withHeldLinks(
+    await _withLibrarySiteIdsMemo(
+      () => _buildSyncDataUnmemoised(
+        hlcSince,
+        childrenByOwnClock: childrenByOwnClock,
+      ),
     ),
   );
+
+  /// The wire entity type whose rows live in the SQL table [table], or null
+  /// for a table that does not sync. Read by the held references to match
+  /// tombstones, which are keyed by entity type.
+  String? _entityTypeForTable(String table) => (_entityTypesByTable ??= {
+    for (final type in const SyncData().toJson().keys.toList().reversed)
+      ?_tableNameFor(type): type,
+  })[table];
+
+  static Map<String, String>? _entityTypesByTable;
+
+  /// The SQL table behind the wire key [entityType], or null for a key with
+  /// no table of its own.
+  String? _tableNameFor(String entityType) {
+    try {
+      return _syncTableFor(entityType).actualTableName;
+    } on ArgumentError {
+      return null;
+    }
+  }
+
+  /// [data] with each link this device still holds carrying the value it
+  /// held (issue #4954). A held link is cleared here only because its parent
+  /// has not arrived yet; sending that null would clear it on every device.
+  /// Sending the held value (rather than leaving the column out) also gives
+  /// the link to a device that has never had the row: it keeps the link, or
+  /// holds it in turn until the parent reaches it.
+  Future<SyncData> _withHeldLinks(SyncData data) async {
+    final filter = await HeldReferenceStore(
+      _db,
+      entityTypeOf: _entityTypeForTable,
+    ).exportFilter();
+    if (filter.isEmpty) return data;
+    final json = data.toJson();
+    var changed = false;
+    final stripped = <String, dynamic>{};
+    for (final entry in json.entries) {
+      final table = _tableNameFor(entry.key);
+      final rows = entry.value;
+      if (table == null || !filter.covers(table) || rows is! List) {
+        stripped[entry.key] = rows;
+        continue;
+      }
+      changed = true;
+      stripped[entry.key] = [
+        for (final row in rows)
+          filter.withHeldValues(table, row as Map<String, dynamic>),
+      ];
+    }
+    return changed ? SyncData.fromJson(stripped) : data;
+  }
 
   Future<SyncData> _buildSyncDataUnmemoised(
     String? hlcSince, {
@@ -3198,6 +3344,18 @@ class SyncDataSerializer {
         'mediaPeople',
         () => _exportMediaPeople(hlcSince),
       ),
+      mediaIdentificationRuns: await _safeExport(
+        'mediaIdentificationRuns',
+        () => _exportMediaIdentificationRuns(hlcSince),
+      ),
+      mediaIdentifications: await _safeExport(
+        'mediaIdentifications',
+        () => _exportMediaIdentifications(hlcSince),
+      ),
+      mediaIdentificationCrops: await _safeExport(
+        'mediaIdentificationCrops',
+        () => _exportMediaIdentificationCrops(hlcSince),
+      ),
       siteFeatures: await _safeExport(
         'siteFeatures',
         () => _exportSiteFeatures(hlcSince),
@@ -3289,12 +3447,54 @@ class SyncDataSerializer {
   Future<T> applyInDeferredFkTransaction<T>(Future<T> Function() body) async {
     return _db.transaction(() async {
       await _db.customStatement('PRAGMA defer_foreign_keys = ON');
+      // Notes from an apply that rolled back describe writes that never
+      // landed.
+      _incomingCopies = IncomingCopies.none;
       return await body();
     });
   }
 
+  /// Forgets every held reference (issue #4954). A replace of the whole
+  /// library calls this: the holds describe the copy it discards, and one
+  /// put back afterwards would bring a row the replacement removed back into
+  /// the new library.
+  Future<void> discardHeldReferences() async {
+    _incomingCopies = IncomingCopies.none;
+    await HeldReferenceStore(_db).discard();
+  }
+
+  /// The peers' copies of held rows seen since the last repair (issue
+  /// #4954). Filled by [noteIncomingRows], read and cleared by the repair.
+  var _incomingCopies = IncomingCopies.none;
+
+  /// Notes which columns each peer row in [records] carries, for the rows
+  /// whose links this device holds, before a merge or adopt overlays them
+  /// onto the local rows (issue #4954). A held link is let go only when a
+  /// copy that carried its column wins; a copy that left the column out (a
+  /// peer whose build does not know it) keeps it held. Every apply path that
+  /// merges into an existing library calls this with the rows as the payload
+  /// carried them; a replace-adopt discards the holds instead.
+  Future<void> noteIncomingRows(
+    String entityType,
+    List<Map<String, dynamic>> records,
+  ) async {
+    if (records.isEmpty) return;
+    final table = _tableNameFor(entityType);
+    if (table == null) return;
+    _incomingCopies =
+        await HeldReferenceStore(
+          _db,
+          entityTypeOf: _entityTypeForTable,
+        ).noteIncoming(_incomingCopies, table, [
+          for (final record in records) withCurrentWireKeys(entityType, record),
+        ]);
+  }
+
   /// Repairs every foreign key left dangling after a sync apply: a nullable
   /// reference is cleared; a non-nullable orphan is deleted (a manual cascade).
+  /// Unless the parent is known deleted, each change is held and undone once
+  /// the parent arrives, and a held link goes out in this device's exports
+  /// as the value it held (issue #4954; see held_references.dart).
   /// Applying a remote deletion of a parent can leave a local row pointing at
   /// it via a non-cascading FK, which would otherwise fail the deferred-FK
   /// COMMIT and abort the whole sync. Must run inside
@@ -3322,7 +3522,11 @@ class SyncDataSerializer {
     final dangling = await _db
         .customSelect('PRAGMA foreign_key_check("$table")')
         .get();
-    if (dangling.isNotEmpty) await _repairDanglingReferences();
+    // A restored orphan can itself name a parent that is still missing, so
+    // a restore that put rows back runs the whole repair after it.
+    if (dangling.isNotEmpty || await _restoreHeldReferences()) {
+      await _repairDanglingReferences();
+    }
     await _rederivePeerValues(writtenEntityType: entityType);
   }
 
@@ -3436,12 +3640,68 @@ class SyncDataSerializer {
     }
   }
 
+  /// Gives back the held rows whose parents arrived (issue #4954), without
+  /// running the whole-database foreign key check. True when it put back a
+  /// held orphan, whose rows the full repair must then check.
+  Future<bool> _restoreHeldReferences() async {
+    final store = HeldReferenceStore(_db, entityTypeOf: _entityTypeForTable);
+    final loaded = await store.load();
+    if (loaded.isEmpty) {
+      _incomingCopies = IncomingCopies.none;
+      return false;
+    }
+    final held = await _restoreArrived(store, loaded);
+    await store.save(held, previous: loaded);
+    // An orphan that left the hold was put back or dropped; either way the
+    // full check after it is cheap next to a failed commit.
+    return loaded.orphans.keys.any((id) => !held.orphans.containsKey(id));
+  }
+
+  /// [HeldReferenceStore.restoreArrived], announcing the tables it wrote.
+  Future<HeldReferences> _restoreArrived(
+    HeldReferenceStore store,
+    HeldReferences held,
+  ) async {
+    final restored = await store.restoreArrived(held, _incomingCopies);
+    _incomingCopies = IncomingCopies.none;
+    if (restored.tables.isNotEmpty) {
+      _log.info(
+        'Sync repair: restored held references in '
+        '${(restored.tables.toList()..sort()).join(', ')}',
+      );
+      // A dive's children tick the dives a watcher reads them through, as
+      // every other write of them does (see [_tickDivesForChild]).
+      final ticksDives = diveChildEntitiesThatTickDives.any(
+        (type) => restored.tables.contains(_tableNameFor(type)),
+      );
+      _db.notifyUpdates({
+        for (final table in restored.tables)
+          TableUpdate(table, kind: UpdateKind.insert),
+        for (final table in restored.tables)
+          TableUpdate(table, kind: UpdateKind.update),
+        if (ticksDives) TableUpdate.onTable(_db.dives, kind: UpdateKind.update),
+      });
+    }
+    return restored.held;
+  }
+
+  /// Clears or deletes every row left naming a missing parent, holding each
+  /// change so it can be undone once that parent arrives (issue #4954): the
+  /// parent can come from another peer, applied in its own transaction or a
+  /// later pull. First gives back whatever an earlier repair held whose
+  /// parent has arrived since.
   Future<void> _repairDanglingReferences() async {
+    final store = HeldReferenceStore(_db, entityTypeOf: _entityTypeForTable);
+    final loaded = await store.load();
+    var held = await _restoreArrived(store, loaded);
     for (var pass = 0; pass < 5; pass++) {
       final violations = await _db
           .customSelect('PRAGMA foreign_key_check')
           .get();
-      if (violations.isEmpty) return;
+      if (violations.isEmpty) {
+        await store.save(held, previous: loaded);
+        return;
+      }
 
       for (final v in violations) {
         final table = v.read<String>('table');
@@ -3449,12 +3709,9 @@ class SyncDataSerializer {
         if (rowid == null) continue; // WITHOUT ROWID tables: not in sync schema
         final fkid = v.read<int>('fkid');
 
-        final fkList = await _db
-            .customSelect('PRAGMA foreign_key_list("$table")')
-            .get();
-        final fk = fkList.where((f) => f.read<int>('id') == fkid).toList();
-        if (fk.isEmpty) continue;
-        final column = fk.first.read<String>('from');
+        final fk = await heldForeignKey(_db, table, fkid);
+        if (fk == null) continue;
+        final column = fk.from;
 
         final info = await _db
             .customSelect('PRAGMA table_info("$table")')
@@ -3468,12 +3725,14 @@ class SyncDataSerializer {
           _log.warning(
             'Sync repair: deleting orphaned $table row (no parent for "$column")',
           );
+          held = await store.holdOrphan(held, table, rowid, fk);
           await _db.customStatement('DELETE FROM "$table" WHERE rowid = ?', [
             rowid,
           ]);
           _db.notifyUpdates({TableUpdate(table, kind: UpdateKind.delete)});
         } else {
           _log.warning('Sync repair: clearing dangling $table."$column"');
+          held = await store.holdLink(held, table, rowid, fk);
           await _db.customStatement(
             'UPDATE "$table" SET "$column" = NULL WHERE rowid = ?',
             [rowid],
@@ -4184,6 +4443,21 @@ class SyncDataSerializer {
           _db.mediaPeople,
         )..where((t) => t.id.equals(recordId))).getSingleOrNull();
         return row?.toJson();
+      case 'mediaIdentificationRuns':
+        final row = await (_db.select(
+          _db.mediaIdentificationRuns,
+        )..where((t) => t.mediaId.equals(recordId))).getSingleOrNull();
+        return row?.toJson(serializer: _syncBlobSerializer);
+      case 'mediaIdentifications':
+        final row = await (_db.select(
+          _db.mediaIdentifications,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson(serializer: _syncBlobSerializer);
+      case 'mediaIdentificationCrops':
+        final row = await (_db.select(
+          _db.mediaIdentificationCrops,
+        )..where((t) => t.id.equals(recordId))).getSingleOrNull();
+        return row?.toJson(serializer: _syncBlobSerializer);
       case 'siteFeatures':
         final row = await (_db.select(
           _db.siteFeatures,
@@ -4341,6 +4615,28 @@ class SyncDataSerializer {
           _db.mediaPeople,
         )..where((t) => t.id.isIn(idList))).get();
         return {for (final r in rows) r.id: r.toJson()};
+      case 'mediaIdentificationRuns':
+        final rows = await (_db.select(
+          _db.mediaIdentificationRuns,
+        )..where((t) => t.mediaId.isIn(idList))).get();
+        return {
+          for (final r in rows)
+            r.mediaId: r.toJson(serializer: _syncBlobSerializer),
+        };
+      case 'mediaIdentifications':
+        final rows = await (_db.select(
+          _db.mediaIdentifications,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {
+          for (final r in rows) r.id: r.toJson(serializer: _syncBlobSerializer),
+        };
+      case 'mediaIdentificationCrops':
+        final rows = await (_db.select(
+          _db.mediaIdentificationCrops,
+        )..where((t) => t.id.isIn(idList))).get();
+        return {
+          for (final r in rows) r.id: r.toJson(serializer: _syncBlobSerializer),
+        };
       case 'species':
         final rows = await (_db.select(
           _db.species,
@@ -6527,6 +6823,36 @@ class SyncDataSerializer {
               MediaPeopleData.fromJson(_withTimestampDefaults(data)),
             );
         return;
+      case 'mediaIdentificationRuns':
+        await _db
+            .into(_db.mediaIdentificationRuns)
+            .insertOnConflictUpdate(
+              MediaIdentificationRunRow.fromJson(
+                data,
+                serializer: _syncBlobSerializer,
+              ),
+            );
+        return;
+      case 'mediaIdentifications':
+        await _db
+            .into(_db.mediaIdentifications)
+            .insertOnConflictUpdate(
+              MediaIdentificationRow.fromJson(
+                data,
+                serializer: _syncBlobSerializer,
+              ),
+            );
+        return;
+      case 'mediaIdentificationCrops':
+        await _db
+            .into(_db.mediaIdentificationCrops)
+            .insertOnConflictUpdate(
+              MediaIdentificationCropRow.fromJson(
+                data,
+                serializer: _syncBlobSerializer,
+              ),
+            );
+        return;
       case 'siteFeatures':
         await _db
             .into(_db.siteFeatures)
@@ -8322,6 +8648,39 @@ class SyncDataSerializer {
           ),
         );
         return;
+      case 'mediaIdentificationRuns':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(_db.mediaIdentificationRuns, [
+            for (final r in records)
+              MediaIdentificationRunRow.fromJson(
+                r,
+                serializer: _syncBlobSerializer,
+              ),
+          ]),
+        );
+        return;
+      case 'mediaIdentifications':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(_db.mediaIdentifications, [
+            for (final r in records)
+              MediaIdentificationRow.fromJson(
+                r,
+                serializer: _syncBlobSerializer,
+              ),
+          ]),
+        );
+        return;
+      case 'mediaIdentificationCrops':
+        await _db.batch(
+          (b) => b.insertAllOnConflictUpdate(_db.mediaIdentificationCrops, [
+            for (final r in records)
+              MediaIdentificationCropRow.fromJson(
+                r,
+                serializer: _syncBlobSerializer,
+              ),
+          ]),
+        );
+        return;
       case 'siteFeatures':
         await _db.batch(
           (b) => b.insertAllOnConflictUpdate(
@@ -8742,6 +9101,18 @@ class SyncDataSerializer {
         return plain(_db.mediaSpecies, _db.mediaSpecies.id);
       case 'mediaPeople':
         return plain(_db.mediaPeople, _db.mediaPeople.id);
+      case 'mediaIdentificationRuns':
+        return plain(
+          _db.mediaIdentificationRuns,
+          _db.mediaIdentificationRuns.mediaId,
+        );
+      case 'mediaIdentifications':
+        return plain(_db.mediaIdentifications, _db.mediaIdentifications.id);
+      case 'mediaIdentificationCrops':
+        return plain(
+          _db.mediaIdentificationCrops,
+          _db.mediaIdentificationCrops.id,
+        );
       case 'siteFeatures':
         return plain(_db.siteFeatures, _db.siteFeatures.id);
       case 'csvPresets':
@@ -9285,6 +9656,12 @@ class SyncDataSerializer {
         return _db.mediaSpecies;
       case 'mediaPeople':
         return _db.mediaPeople;
+      case 'mediaIdentificationRuns':
+        return _db.mediaIdentificationRuns;
+      case 'mediaIdentifications':
+        return _db.mediaIdentifications;
+      case 'mediaIdentificationCrops':
+        return _db.mediaIdentificationCrops;
       case 'siteFeatures':
         return _db.siteFeatures;
       case 'csvPresets':
@@ -10039,6 +10416,21 @@ class SyncDataSerializer {
       case 'mediaPeople':
         await (_db.delete(
           _db.mediaPeople,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'mediaIdentificationRuns':
+        await (_db.delete(
+          _db.mediaIdentificationRuns,
+        )..where((t) => t.mediaId.equals(recordId))).go();
+        return;
+      case 'mediaIdentifications':
+        await (_db.delete(
+          _db.mediaIdentifications,
+        )..where((t) => t.id.equals(recordId))).go();
+        return;
+      case 'mediaIdentificationCrops':
+        await (_db.delete(
+          _db.mediaIdentificationCrops,
         )..where((t) => t.id.equals(recordId))).go();
         return;
       case 'siteFeatures':
@@ -12062,6 +12454,48 @@ class SyncDataSerializer {
     return rows.map((r) => r.toJson()).toList();
   }
 
+  /// Marine life runs (v381, issue #4876), on their own clock.
+  Future<List<Map<String, dynamic>>> _exportMediaIdentificationRuns(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.mediaIdentificationRuns);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson(serializer: _syncBlobSerializer)).toList();
+  }
+
+  /// Marine life identifications: due when the row clock or the decision
+  /// clock has moved past the watermark, since a decision stamps only its
+  /// own clock (SyncFactGroups.identificationDecision).
+  Future<List<Map<String, dynamic>>> _exportMediaIdentifications(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.mediaIdentifications);
+    if (hlcSince != null) {
+      query.where(
+        (t) =>
+            t.hlc.isBiggerThanValue(hlcSince) |
+            t.decisionHlc.isBiggerThanValue(hlcSince),
+      );
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson(serializer: _syncBlobSerializer)).toList();
+  }
+
+  /// The crops of named identifications, written once each.
+  Future<List<Map<String, dynamic>>> _exportMediaIdentificationCrops(
+    String? hlcSince,
+  ) async {
+    final query = _db.select(_db.mediaIdentificationCrops);
+    if (hlcSince != null) {
+      query.where((t) => t.hlc.isBiggerThanValue(hlcSince));
+    }
+    final rows = await query.get();
+    return rows.map((r) => r.toJson(serializer: _syncBlobSerializer)).toList();
+  }
+
   Future<List<Map<String, dynamic>>> _exportCsvPresets(String? hlcSince) async {
     final query = _db.select(_db.csvPresets);
     if (hlcSince != null) {
@@ -12605,6 +13039,10 @@ class SyncDataSerializer {
       // v370: seed it so payloads predating the column hydrate instead of
       // throwing in DiverSetting.fromJson (issue #4593).
       'defaultShowBuoyancy': false,
+      // v379: the three Avelo profile lines (issue #4664).
+      'defaultShowAveloBuoyancy': false,
+      'defaultShowAveloGasRemaining': false,
+      'defaultShowComputerRmv': false,
       // v177: GTR settings; seed them so payloads predating the columns
       // hydrate instead of throwing in DiverSetting.fromJson.
       'defaultShowGtr': false,

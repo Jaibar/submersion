@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'package:submersion/features/buddies/presentation/editing/buddy_new_sitting.dart';
 import 'package:submersion/features/change_log/presentation/widgets/change_log_history_menu_item.dart';
 import 'package:submersion/features/connections/domain/entities/connection_kind.dart';
 import 'package:submersion/features/connections/domain/entities/node_ref.dart';
@@ -33,9 +34,37 @@ import 'package:submersion/features/certification_agencies/presentation/provider
 import 'package:submersion/features/certification_agencies/presentation/providers/certification_catalog_providers.dart';
 import 'package:submersion/features/documents/presentation/widgets/documents_section.dart';
 import 'package:submersion/features/documents/domain/entities/document.dart';
-import 'package:submersion/features/equipment/presentation/widgets/lend_gear_flow.dart';
 import 'package:submersion/shared/widgets/detail_row/detail_row_group.dart';
 import 'package:submersion/shared/widgets/markdown_notes/markdown_notes_view.dart';
+import 'package:submersion/features/buddies/data/services/buddy_edit_save_service.dart';
+import 'package:submersion/features/buddies/presentation/editing/buddy_card_ids.dart';
+import 'package:submersion/features/buddies/presentation/editing/buddy_certifications_sitting.dart';
+import 'package:submersion/features/buddies/presentation/editing/buddy_edit_cards.dart';
+import 'package:submersion/features/buddies/presentation/pages/buddy_edit_routes.dart';
+import 'package:submersion/features/buddies/presentation/editing/buddy_gear_sitting.dart';
+import 'package:submersion/features/equipment/domain/entities/equipment_location.dart';
+import 'package:submersion/features/equipment/domain/services/gear_with_buddy.dart';
+import 'package:submersion/features/equipment/presentation/pages/equipment_location_list_page.dart';
+import 'package:submersion/features/equipment/presentation/providers/equipment_location_providers.dart';
+import 'package:submersion/features/documents/presentation/editing/record_document_links_sitting.dart';
+import 'package:submersion/shared/widgets/record_editing/add_strip.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_card.dart';
+import 'package:submersion/shared/widgets/record_editing/edit_session.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_fade.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_frame.dart';
+import 'package:submersion/shared/widgets/record_editing/record_card_pencil.dart';
+import 'package:submersion/shared/widgets/record_editing/record_creating.dart';
+import 'package:submersion/shared/widgets/record_editing/record_edit_host.dart';
+import 'package:submersion/shared/widgets/record_editing/record_open_unlocked.dart';
+import 'package:submersion/shared/widgets/record_editing/record_operation_gate.dart';
+import 'package:submersion/shared/widgets/record_editing/record_pane_row.dart';
+
+part 'buddy_detail_page_creating.dart';
+part 'buddy_detail_page_editing.dart';
+part 'buddy_detail_page_header.dart';
+
+/// A buddy's page. It opens locked and edits in place (issue #4527): its cards
+/// are held in one sitting and written by one Save.
 
 class BuddyDetailPage extends ConsumerStatefulWidget {
   final String buddyId;
@@ -46,23 +75,80 @@ class BuddyDetailPage extends ConsumerStatefulWidget {
   /// Callback when delete completes (used in embedded mode).
   final VoidCallback? onDeleted;
 
+  /// Opens unlocked, as the old edit address asks (`?mode=edit`).
+  final bool openUnlocked;
+
+  /// Told when a sitting the page opened unlocked ends: the list pane's
+  /// edit returns to the buddy in view.
+  final VoidCallback? onSittingEnded;
+
+  /// A new buddy (issue #4527, phase 3, plan 11): the page opened unlocked
+  /// on a buddy not yet created, with what the opener brought.
+  final ({NewBuddySeed? seed})? newBuddy;
+
+  /// The pane's own: given the new buddy's id once created.
+  final void Function(String buddyId)? onCreated;
+
+  /// The pane's own: told when a new buddy's page leaves uncreated.
+  final VoidCallback? onCreateCancelled;
+
   const BuddyDetailPage({
     super.key,
     required this.buddyId,
     this.embedded = false,
     this.onDeleted,
-  });
+    this.openUnlocked = false,
+    this.onSittingEnded,
+  }) : newBuddy = null,
+       onCreated = null,
+       onCreateCancelled = null;
+
+  /// A new buddy's page.
+  const BuddyDetailPage.newBuddy({
+    super.key,
+    NewBuddySeed? seed,
+    this.embedded = false,
+    this.onCreated,
+    this.onCreateCancelled,
+  }) : newBuddy = (seed: seed),
+       buddyId = '',
+       onDeleted = null,
+       openUnlocked = false,
+       onSittingEnded = null;
 
   @override
   ConsumerState<BuddyDetailPage> createState() => _BuddyDetailPageState();
 }
 
-class _BuddyDetailPageState extends ConsumerState<BuddyDetailPage> {
+class _BuddyDetailPageState extends ConsumerState<BuddyDetailPage>
+    with
+        RecordEditHost<BuddyDetailPage, Buddy>,
+        RecordOpenUnlocked<BuddyDetailPage, Buddy>,
+        _BuddyDetailPageEditing,
+        RecordCreating<BuddyDetailPage, Buddy>,
+        _BuddyDetailPageCreating {
   bool _hasRedirected = false;
+
+  @override
+  void dispose() {
+    disposeEditing();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     ref.watch(certificationCatalogSyncProvider);
+    if (isCreating) {
+      final waiting = newRecordWaiting(context);
+      if (waiting != null) return waiting;
+      final seed = newRecordSeed!;
+      return _BuddyDetailContent(
+        buddy: shownRecord(seed),
+        stored: seed,
+        embedded: widget.embedded,
+        host: this,
+      );
+    }
     // Desktop redirect: a root visit (deep link, sidebar) moves into the
     // master-detail split. A pushed page, opened from a dive's details
     // say, stays put: the redirect's go() would erase the page under it
@@ -76,12 +162,18 @@ class _BuddyDetailPageState extends ConsumerState<BuddyDetailPage> {
       _hasRedirected = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
-          context.go('/buddies?selected=${widget.buddyId}');
+          context.go(
+            buddyPaneLocation(
+              widget.buddyId,
+              openUnlocked: widget.openUnlocked,
+            ),
+          );
         }
       });
     }
 
     final buddyAsync = ref.watch(buddyByIdProvider(widget.buddyId));
+    followStored(buddyByIdProvider(widget.buddyId));
 
     return buddyAsync.when(
       data: (buddy) {
@@ -94,10 +186,13 @@ class _BuddyDetailPageState extends ConsumerState<BuddyDetailPage> {
             body: Center(child: Text(context.l10n.buddies_detail_notFound)),
           );
         }
+        openUnlockedOnce(buddy);
         return _BuddyDetailContent(
-          buddy: buddy,
+          buddy: shownRecord(buddy),
+          stored: buddy,
           embedded: widget.embedded,
           onDeleted: widget.onDeleted,
+          host: this,
         );
       },
       loading: () {
@@ -127,15 +222,34 @@ class _BuddyDetailPageState extends ConsumerState<BuddyDetailPage> {
 }
 
 class _BuddyDetailContent extends ConsumerWidget {
+  /// The buddy the cards show: the sitting's while unlocked.
   final Buddy buddy;
+
+  /// The buddy as stored.
+  final Buddy stored;
   final bool embedded;
   final VoidCallback? onDeleted;
 
+  /// The page, which edits in place.
+  final _BuddyDetailPageState host;
+
   const _BuddyDetailContent({
     required this.buddy,
+    required this.stored,
+    required this.host,
     this.embedded = false,
     this.onDeleted,
   });
+
+  /// Whether the buddy is not yet created: what it cannot have yet (gear
+  /// lent, shared dives, photos) is left out, and nothing acts on it.
+  bool get _creating => host.isCreating;
+
+  /// [child] as the card [id].
+  Widget _framed(BuddyCardId id, Widget child) => host._framed(id, child);
+
+  /// Whether the empty card [id] is shown in the sitting.
+  bool _shows(BuddyCardId id) => host._showsWhileEmpty(id);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -150,289 +264,121 @@ class _BuddyDetailContent extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Profile header
-          _buildProfileHeader(context, ref),
+          _framed(BuddyCardId.header, _buildProfileHeader(context, ref)),
           const SizedBox(height: 24),
 
           // Contact info
           if (buddy.hasContactInfo ||
               buddy.socialHandle != null ||
               buddy.country != null ||
-              buddy.linkedDiverId != null) ...[
-            _buildContactSection(context, ref),
+              buddy.linkedDiverId != null ||
+              _shows(BuddyCardId.contact)) ...[
+            _framed(BuddyCardId.contact, _buildContactSection(context, ref)),
             const SizedBox(height: 24),
           ],
 
           // What their buddy card said (issue #3728).
           if (buddy.hasCardDetails) ...[
-            BuddyCardDetailsSection(buddy: buddy),
+            _faded(
+              RecordCardFadeReason.imported,
+              BuddyCardDetailsSection(buddy: buddy),
+            ),
             const SizedBox(height: 24),
           ],
 
           // Certifications (issue #553): full list from the certifications
           // table, with an empty state.
-          _buildCertificationSection(context, ref),
+          _framed(
+            BuddyCardId.certifications,
+            _buildCertificationSection(context, ref),
+          ),
           const SizedBox(height: 24),
 
           // Statistics
-          _buildStatsSection(context, statsAsync, units),
+          _framed(
+            BuddyCardId.statistics,
+            _buildStatsSection(context, statsAsync, units),
+          ),
           const SizedBox(height: 24),
 
           // Gear they have (issue #3790), with its own spacing: most buddies
           // have none and show no gap.
-          BuddyGearSection(buddy: buddy),
+          if (_creating)
+            const SizedBox.shrink()
+          else if (!host._gearEmpty(ref, buddy) || _shows(BuddyCardId.gear))
+            _framed(
+              BuddyCardId.gear,
+              BuddyGearSection(
+                buddy: buddy,
+                shown: host.maybeEditController?.session,
+              ),
+            ),
 
           // Notes
-          if (buddy.notes.isNotEmpty) ...[
-            _buildNotesSection(context),
+          if (buddy.notes.isNotEmpty || _shows(BuddyCardId.notes)) ...[
+            _framed(BuddyCardId.notes, _buildNotesSection(context)),
             const SizedBox(height: 24),
           ],
-          DocumentsSection(
-            owner: DocumentOwner(DocumentOwnerKind.buddy, buddy.id),
+          _framed(
+            BuddyCardId.documents,
+            DocumentsSection<Buddy>(
+              owner: DocumentOwner(DocumentOwnerKind.buddy, buddy.id),
+            ),
           ),
           const SizedBox(height: 24),
 
-          // Shared dives
-          BuddySharedDivesSection(buddyId: buddy.id),
+          if (!_creating) ...[
+            // Shared dives
+            _faded(
+              RecordCardFadeReason.calculated,
+              BuddySharedDivesSection(buddyId: buddy.id),
+            ),
 
-          // Photos and videos they are tagged in (issue #1745)
-          BuddyPhotosSection(buddyId: buddy.id),
+            // Photos and videos they are tagged in (issue #1745)
+            _faded(
+              RecordCardFadeReason.calculated,
+              BuddyPhotosSection(buddyId: buddy.id),
+            ),
+          ],
         ],
       ),
     );
 
     if (embedded) {
-      return Column(
-        children: [
-          _buildEmbeddedHeader(context, ref),
-          Expanded(child: body),
-        ],
+      return host.editPane(
+        header: RecordPaneRow(
+          locked: _buildEmbeddedHeader(context, ref),
+          unlocked: host.isSittingOpen
+              ? host.editingPaneRow(
+                  stored,
+                  menu: _creating
+                      ? const SizedBox.shrink()
+                      : _menu(context, ref),
+                )
+              : null,
+        ),
+        shown: buddy,
+        content: body,
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(buddy.name),
-        actions: [
-          BuddyFavoriteButton(buddyId: buddy.id, isFavorite: buddy.isFavorite),
-          IconButton(
-            icon: const Icon(Icons.edit),
-            tooltip: context.l10n.buddies_action_edit,
-            onPressed: () => context.push('/buddies/${buddy.id}/edit'),
-          ),
-          PopupMenuButton<String>(
-            onSelected: (value) async {
-              if (value == kOpenInConnectionsAction) {
-                openInConnections(
-                  context,
-                  NodeRef(ConnectionKind.buddy, buddy.id),
-                );
-              } else if (value == 'lend') {
-                await showLendGearFlow(context, ref, buddy);
-              } else if (value == 'share') {
-                await _shareDivesWithBuddy(context, ref);
-              } else if (value == 'delete') {
-                await _handleDelete(context, ref);
-              }
-            },
-            itemBuilder: (context) => [
-              changeLogHistoryMenuItem(
-                context,
-                rootTable: 'buddies',
-                rootId: buddy.id,
-              ),
-              openInConnectionsMenuItem(context),
-              PopupMenuItem(
-                value: 'lend',
-                child: Row(
-                  children: [
-                    const Icon(Icons.volunteer_activism_outlined),
-                    const SizedBox(width: 8),
-                    Text(context.l10n.buddies_action_lendGear),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'share',
-                child: Row(
-                  children: [
-                    const Icon(Icons.share),
-                    const SizedBox(width: 8),
-                    Text(context.l10n.buddies_action_shareDives),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'delete',
-                child: Row(
-                  children: [
-                    const Icon(Icons.delete, color: Colors.red),
-                    const SizedBox(width: 8),
-                    Text(
-                      context.l10n.common_action_delete,
-                      style: const TextStyle(color: Colors.red),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: body,
+    final bar = AppBar(
+      title: Text(buddy.name),
+      actions: [
+        host.lockButton(buddy),
+        // The favourite is set on the header: the bar's star only shows it.
+        BuddyFavoriteButton(isFavorite: buddy.isFavorite),
+        _menu(context, ref),
+      ],
+    );
+    return host.editScaffold(
+      record: stored,
+      shown: buddy,
+      lockedBar: bar,
+      unlockedActions: [if (!_creating) _menu(context, ref)],
+      content: body,
     );
   }
-
-  Widget _buildEmbeddedHeader(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final colorScheme = theme.colorScheme;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      decoration: BoxDecoration(
-        color: colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(color: colorScheme.outlineVariant, width: 1),
-        ),
-      ),
-      child: Row(
-        children: [
-          ProfileAvatar(
-            photo: buddy.photo,
-            initials: buddy.initials,
-            radius: 18,
-            backgroundColor: colorScheme.primaryContainer,
-            textStyle: TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.bold,
-              color: colorScheme.onPrimaryContainer,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  buddy.name,
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                if (buddyCertificationLineL10n(
-                      buddy,
-                      context.l10n,
-                      catalog: context.certificationCatalog,
-                    ) !=
-                    null)
-                  Text(
-                    buddyCertificationLineL10n(
-                      buddy,
-                      context.l10n,
-                      catalog: context.certificationCatalog,
-                    )!,
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-              ],
-            ),
-          ),
-          BuddyFavoriteButton(
-            buddyId: buddy.id,
-            isFavorite: buddy.isFavorite,
-            iconSize: 20,
-          ),
-          IconButton(
-            icon: const Icon(Icons.edit, size: 20),
-            tooltip: context.l10n.common_action_edit,
-            onPressed: () {
-              final state = GoRouterState.of(context);
-              context.go('${state.uri.path}?selected=${buddy.id}&mode=edit');
-            },
-          ),
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, size: 20),
-            onSelected: (value) async {
-              if (value == kOpenInConnectionsAction) {
-                openInConnections(
-                  context,
-                  NodeRef(ConnectionKind.buddy, buddy.id),
-                );
-              } else if (value == 'lend') {
-                await showLendGearFlow(context, ref, buddy);
-              } else if (value == 'share') {
-                await _shareDivesWithBuddy(context, ref);
-              } else if (value == 'delete') {
-                await _handleDelete(context, ref);
-              }
-            },
-            itemBuilder: (context) => [
-              changeLogHistoryMenuItem(
-                context,
-                rootTable: 'buddies',
-                rootId: buddy.id,
-              ),
-              openInConnectionsMenuItem(context),
-              PopupMenuItem(
-                value: 'lend',
-                child: Row(
-                  children: [
-                    const Icon(Icons.volunteer_activism_outlined, size: 20),
-                    const SizedBox(width: 8),
-                    Text(context.l10n.buddies_action_lendGear),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'share',
-                child: Row(
-                  children: [
-                    const Icon(Icons.share, size: 20),
-                    const SizedBox(width: 8),
-                    Text(context.l10n.buddies_action_shareDives),
-                  ],
-                ),
-              ),
-              PopupMenuItem(
-                value: 'delete',
-                child: Row(
-                  children: [
-                    const Icon(Icons.delete, color: Colors.red, size: 20),
-                    const SizedBox(width: 8),
-                    Text(
-                      context.l10n.common_action_delete,
-                      style: const TextStyle(color: Colors.red),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _handleDelete(BuildContext context, WidgetRef ref) async {
-    final confirmed = await _showDeleteConfirmation(context);
-    if (confirmed && context.mounted) {
-      await ref.read(buddyListNotifierProvider.notifier).deleteBuddy(buddy.id);
-      if (context.mounted) {
-        if (embedded) {
-          onDeleted?.call();
-        } else {
-          context.pop();
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(context.l10n.buddies_message_deleted)),
-        );
-      }
-    }
-  }
-
-  Future<void> _shareDivesWithBuddy(BuildContext context, WidgetRef ref) =>
-      shareDivesWithBuddy(context, ref, buddy.id);
 
   Widget _buildProfileHeader(BuildContext context, WidgetRef ref) {
     return Center(
@@ -449,7 +395,22 @@ class _BuddyDetailContent extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 16),
-          Text(buddy.name, style: Theme.of(context).textTheme.headlineMedium),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  buddy.name,
+                  style: Theme.of(context).textTheme.headlineMedium,
+                ),
+              ),
+              RecordCardPencil(
+                cardTitle: BuddyCardId.header.localizedDisplayName(
+                  context.l10n,
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -470,12 +431,7 @@ class _BuddyDetailContent extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.buddies_section_contact,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
+            _sectionTitle(context, context.l10n.buddies_section_contact),
             const SizedBox(height: 12),
             if (buddy.linkedDiverId != null)
               ListTile(
@@ -538,19 +494,22 @@ class _BuddyDetailContent extends ConsumerWidget {
   }
 
   Widget _buildCertificationSection(BuildContext context, WidgetRef ref) {
-    final certsAsync = ref.watch(buddyCertificationsProvider(buddy.id));
+    final stored = ref.watch(buddyCertificationsProvider(buddy.id));
+    // The sitting's list once it holds a change.
+    final session = host.maybeEditController?.session;
+    final held = session != null && buddyCertificationsList.isChanged(session)
+        ? buddyCertificationsList.current(session)
+        : null;
+    final certsAsync = held != null
+        ? AsyncValue.data(buddyCertificationsInOrder(held))
+        : stored;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.buddies_section_certifications,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
+            _sectionTitle(context, context.l10n.buddies_section_certifications),
             const SizedBox(height: 12),
             certsAsync.when(
               loading: () => const Padding(
@@ -607,11 +566,9 @@ class _BuddyDetailContent extends ConsumerWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
+              _sectionTitle(
+                context,
                 context.l10n.buddies_section_diveStatistics,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
               ),
               const SizedBox(height: 12),
               statsAsync.when(
@@ -684,44 +641,13 @@ class _BuddyDetailContent extends ConsumerWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              context.l10n.buddies_section_notes,
-              style: Theme.of(
-                context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
+            _sectionTitle(context, context.l10n.buddies_section_notes),
             const SizedBox(height: 12),
             MarkdownNotesView(buddy.notes),
           ],
         ),
       ),
     );
-  }
-
-  Future<bool> _showDeleteConfirmation(BuildContext context) async {
-    return await showDialog<bool>(
-          context: context,
-          builder: (context) => AlertDialog(
-            title: Text(context.l10n.buddies_dialog_deleteTitle),
-            content: Text(
-              context.l10n.buddies_dialog_deleteMessage(buddy.name),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: Text(context.l10n.common_action_cancel),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                style: FilledButton.styleFrom(
-                  backgroundColor: Theme.of(context).colorScheme.error,
-                ),
-                child: Text(context.l10n.common_action_delete),
-              ),
-            ],
-          ),
-        ) ??
-        false;
   }
 
   Future<void> _launchEmail(String email) async {

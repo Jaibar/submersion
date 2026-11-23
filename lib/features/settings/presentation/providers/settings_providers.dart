@@ -104,6 +104,27 @@ class SettingsKeys {
   /// opened in the viewer (issue #4668).
   static const String identifyFishOnOpen = 'species_id_identify_on_open';
 
+  /// Device-local: whether matches the app is confident of are tagged with
+  /// no tap, marked unconfirmed (issue #4727). Off by default.
+  static const String speciesIdAutoApply = 'species_id_auto_apply';
+
+  /// Device-local: whether the diver dismissed the offer to download the
+  /// identification model (issue #4773). Off by default.
+  static const String speciesIdDownloadPromptDismissed =
+      'species_id_download_prompt_dismissed';
+
+  /// Device-local: when such a tag logs its dive's sighting, by
+  /// `SightingTiming` name (issue #4727).
+  static const String speciesIdSightingTiming = 'species_id_sighting_timing';
+
+  /// Device-local: how sure the app must be before it names a fish, a
+  /// naming level's id (issue #4721).
+  static const String marineLifeNamingLevel = 'species_id_naming_level';
+
+  /// What the viewer draws over photos and videos for the animals found
+  /// (issue #4825): names, allLife or off. Unset reads as names.
+  static const String marineLifeLabelMode = 'species_id_label_mode';
+
   /// Device-local: whether the fullscreen viewers fill the window or take
   /// the desktop window into OS fullscreen.
   static const String viewerFullscreenMode = 'viewer_fullscreen_mode';
@@ -154,10 +175,16 @@ class SettingsKeys {
 
   static const String hiddenHomeChips = 'hidden_home_chips';
 
-  // Home card layout is device-local like the chip toggles above (stored
-  // directly in SharedPreferences rather than per-diver in the DB).
-  static const String homeCardOrder = 'home_card_order';
+  // The retired Home card layout's hidden set, read once as the starting
+  // point of the panel layout below and never written.
   static const String hiddenHomeCards = 'hidden_home_cards';
+
+  // The Home panel layout (issue #4824), device-local like the keys above.
+  // New keys rather than reuse of the card keys: the cards' values are left
+  // as they were, read once as the upgrade's starting point.
+  static const String homePanelOrder = 'home_panel_order';
+  static const String hiddenHomePanels = 'hidden_home_panels';
+  static const String hiddenHomeKeyNumbers = 'hidden_home_key_numbers';
 
   // Whether profile-chart metric overlays follow the visible depth window
   // when zoomed. Per-diver since v262; see [pscrRatio].
@@ -655,6 +682,12 @@ class AppSettings implements UnitFormatterSettings {
   /// (issue #4593)
   final bool defaultShowBuoyancy;
 
+  /// Default visibility of the three Avelo lines on the dive profile (issue
+  /// #4664): the computer's buoyancy, gas remaining and RMV.
+  final bool defaultShowAveloBuoyancy;
+  final bool defaultShowAveloGasRemaining;
+  final bool defaultShowComputerRmv;
+
   /// The dive types this diver starred, listed first in the dive type
   /// pickers (issue #4413). Ids that match no type are ignored.
   final Set<String> favouriteDiveTypeIds;
@@ -771,13 +804,21 @@ class AppSettings implements UnitFormatterSettings {
   /// Device-local, not per-diver.
   final Set<String> hiddenHomeChips;
 
-  /// Display order of home screen cards ([HomeCardType.name] values).
-  /// Empty means the default order. Device-local, not per-diver.
-  final List<String> homeCardOrder;
-
-  /// Home screen cards the user has toggled off ([HomeCardType.name]
-  /// values). Device-local, not per-diver.
+  /// Cards switched off on the retired card Home. Read-only: the first run
+  /// of the panel Home keeps hidden any panel that shares a card's name.
   final Set<String> hiddenHomeCards;
+
+  /// Home panel display order (HomePanelType.name values), or null when the
+  /// diver has never set a layout. Device-local, not per-diver.
+  final List<String>? homePanelOrder;
+
+  /// Home panels switched off (HomePanelType.name values), or null when
+  /// never set. Device-local, not per-diver.
+  final Set<String>? hiddenHomePanels;
+
+  /// Key number tiles switched off (HomeKeyNumber.name values), or null for
+  /// the default set. Device-local, not per-diver.
+  final Set<String>? hiddenHomeKeyNumbers;
 
   /// Whether the dive profile chart's secondary-axis metric overlays (NDL,
   /// ppO2, GF, ...) follow the visible depth window when zoomed instead of
@@ -961,6 +1002,9 @@ class AppSettings implements UnitFormatterSettings {
     this.defaultShowO2CellMv = false,
     this.defaultShowCounterdiffusion = false,
     this.defaultShowBuoyancy = false,
+    this.defaultShowAveloBuoyancy = false,
+    this.defaultShowAveloGasRemaining = false,
+    this.defaultShowComputerRmv = false,
     this.favouriteDiveTypeIds = const {},
     this.defaultShowEstimatedTankPressure = true,
     this.defaultShowAscentRateLine = false,
@@ -1013,8 +1057,10 @@ class AppSettings implements UnitFormatterSettings {
     this.siteDetailSections = SiteDetailSectionConfig.defaultSections,
     this.siteDetailLayout = DiveDetailLayout.detailed,
     this.hiddenHomeChips = const <String>{},
-    this.homeCardOrder = const <String>[],
     this.hiddenHomeCards = const <String>{},
+    this.homePanelOrder,
+    this.hiddenHomePanels,
+    this.hiddenHomeKeyNumbers,
     this.profileMetricsFollowViewport = false,
     this.o2CellUnit = O2CellUnit.ppO2,
     this.counterdiffusionShowAll = false,
@@ -1202,6 +1248,9 @@ class AppSettings implements UnitFormatterSettings {
     bool? defaultShowO2CellMv,
     bool? defaultShowCounterdiffusion,
     bool? defaultShowBuoyancy,
+    bool? defaultShowAveloBuoyancy,
+    bool? defaultShowAveloGasRemaining,
+    bool? defaultShowComputerRmv,
     Set<String>? favouriteDiveTypeIds,
     bool? defaultShowEstimatedTankPressure,
     bool? defaultShowAscentRateLine,
@@ -1259,8 +1308,10 @@ class AppSettings implements UnitFormatterSettings {
     bool clearSiteDetailSections = false,
     DiveDetailLayout? siteDetailLayout,
     Set<String>? hiddenHomeChips,
-    List<String>? homeCardOrder,
     Set<String>? hiddenHomeCards,
+    List<String>? homePanelOrder,
+    Set<String>? hiddenHomePanels,
+    Set<String>? hiddenHomeKeyNumbers,
     bool? profileMetricsFollowViewport,
     O2CellUnit? o2CellUnit,
     bool? counterdiffusionShowAll,
@@ -1449,6 +1500,12 @@ class AppSettings implements UnitFormatterSettings {
       defaultShowCounterdiffusion:
           defaultShowCounterdiffusion ?? this.defaultShowCounterdiffusion,
       defaultShowBuoyancy: defaultShowBuoyancy ?? this.defaultShowBuoyancy,
+      defaultShowAveloBuoyancy:
+          defaultShowAveloBuoyancy ?? this.defaultShowAveloBuoyancy,
+      defaultShowAveloGasRemaining:
+          defaultShowAveloGasRemaining ?? this.defaultShowAveloGasRemaining,
+      defaultShowComputerRmv:
+          defaultShowComputerRmv ?? this.defaultShowComputerRmv,
       favouriteDiveTypeIds: favouriteDiveTypeIds ?? this.favouriteDiveTypeIds,
       defaultShowEstimatedTankPressure:
           defaultShowEstimatedTankPressure ??
@@ -1536,8 +1593,10 @@ class AppSettings implements UnitFormatterSettings {
           : (siteDetailSections ?? this.siteDetailSections),
       siteDetailLayout: siteDetailLayout ?? this.siteDetailLayout,
       hiddenHomeChips: hiddenHomeChips ?? this.hiddenHomeChips,
-      homeCardOrder: homeCardOrder ?? this.homeCardOrder,
       hiddenHomeCards: hiddenHomeCards ?? this.hiddenHomeCards,
+      homePanelOrder: homePanelOrder ?? this.homePanelOrder,
+      hiddenHomePanels: hiddenHomePanels ?? this.hiddenHomePanels,
+      hiddenHomeKeyNumbers: hiddenHomeKeyNumbers ?? this.hiddenHomeKeyNumbers,
       profileMetricsFollowViewport:
           profileMetricsFollowViewport ?? this.profileMetricsFollowViewport,
       o2CellUnit: o2CellUnit ?? this.o2CellUnit,
@@ -1803,8 +1862,10 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
   /// in [state]: the ones [_loadSettings] reads from SharedPreferences.
   AppSettings _withDeviceLocalPrefs(AppSettings settings) => settings.copyWith(
     hiddenHomeChips: state.hiddenHomeChips,
-    homeCardOrder: state.homeCardOrder,
     hiddenHomeCards: state.hiddenHomeCards,
+    homePanelOrder: state.homePanelOrder,
+    hiddenHomePanels: state.hiddenHomePanels,
+    hiddenHomeKeyNumbers: state.hiddenHomeKeyNumbers,
     o2CellUnit: state.o2CellUnit,
     counterdiffusionShowAll: state.counterdiffusionShowAll,
     perdixOverlayEnabled: state.perdixOverlayEnabled,
@@ -1849,20 +1910,31 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     final hiddenHomeChips =
         prefs.getStringList(SettingsKeys.hiddenHomeChips)?.toSet() ??
         const <String>{};
-    List<String> homeCardOrder;
     Set<String> hiddenHomeCards;
     try {
-      homeCardOrder =
-          prefs.getStringList(SettingsKeys.homeCardOrder) ?? const [];
       hiddenHomeCards =
           prefs.getStringList(SettingsKeys.hiddenHomeCards)?.toSet() ??
           const <String>{};
     } catch (_) {
       // Corrupt pref types must never block the dashboard; fall back to
       // the default layout.
-      homeCardOrder = const [];
       hiddenHomeCards = const <String>{};
     }
+    // Read one by one: a corrupt value in one key must not discard the
+    // others, and must never block Home (it then starts from Balanced).
+    List<String>? readList(String key) {
+      try {
+        return prefs.getStringList(key);
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final homePanelOrder = readList(SettingsKeys.homePanelOrder);
+    final hiddenHomePanels = readList(SettingsKeys.hiddenHomePanels)?.toSet();
+    final hiddenHomeKeyNumbers = readList(
+      SettingsKeys.hiddenHomeKeyNumbers,
+    )?.toSet();
     // Since v262 the pSCR ratio and "metrics follow viewport" are per-diver
     // (synced, issue #2948). These prefs are the store while no diver
     // exists, and the value a diver row that has never held one adopts.
@@ -1893,8 +1965,10 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
       _replaceBase(null);
       state = AppSettings(
         hiddenHomeChips: hiddenHomeChips,
-        homeCardOrder: homeCardOrder,
         hiddenHomeCards: hiddenHomeCards,
+        homePanelOrder: homePanelOrder,
+        hiddenHomePanels: hiddenHomePanels,
+        hiddenHomeKeyNumbers: hiddenHomeKeyNumbers,
         pscrRatio: pscrRatioPref ?? 100.0,
         profileMetricsFollowViewport: followViewportPref ?? false,
         o2CellUnit: o2CellUnit,
@@ -1964,8 +2038,10 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     _replaceBase(settings);
     state = settings.copyWith(
       hiddenHomeChips: hiddenHomeChips,
-      homeCardOrder: homeCardOrder,
       hiddenHomeCards: hiddenHomeCards,
+      homePanelOrder: homePanelOrder,
+      hiddenHomePanels: hiddenHomePanels,
+      hiddenHomeKeyNumbers: hiddenHomeKeyNumbers,
       o2CellUnit: o2CellUnit,
       counterdiffusionShowAll: counterdiffusionShowAll,
       perdixOverlayEnabled: perdixOverlayEnabled,
@@ -2042,14 +2118,26 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
           SettingsKeys.hiddenHomeChips,
           state.hiddenHomeChips.toList()..sort(),
         );
-        await prefs.setStringList(
-          SettingsKeys.homeCardOrder,
-          state.homeCardOrder,
-        );
-        await prefs.setStringList(
-          SettingsKeys.hiddenHomeCards,
-          state.hiddenHomeCards.toList()..sort(),
-        );
+        // Written only once set: absent keys are how the first run of the
+        // new Home tells a fresh layout from a chosen one.
+        final panelOrder = state.homePanelOrder;
+        if (panelOrder != null) {
+          await prefs.setStringList(SettingsKeys.homePanelOrder, panelOrder);
+        }
+        final hiddenPanels = state.hiddenHomePanels;
+        if (hiddenPanels != null) {
+          await prefs.setStringList(
+            SettingsKeys.hiddenHomePanels,
+            hiddenPanels.toList()..sort(),
+          );
+        }
+        final hiddenTiles = state.hiddenHomeKeyNumbers;
+        if (hiddenTiles != null) {
+          await prefs.setStringList(
+            SettingsKeys.hiddenHomeKeyNumbers,
+            hiddenTiles.toList()..sort(),
+          );
+        }
         await prefs.setString(SettingsKeys.o2CellUnit, state.o2CellUnit.name);
         await prefs.setBool(
           SettingsKeys.counterdiffusionShowAll,
@@ -2688,28 +2776,26 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
     ),
   );
 
-  /// Show or hide one home card (id = HomeCardType.name).
-  Future<void> setHomeCardEnabled(String cardId, bool enabled) => _update(
-    (s) => s.copyWith(
-      hiddenHomeCards: _withMember(s.hiddenHomeCards, cardId, !enabled),
-    ),
-  );
-
-  /// Persist the home card display order (HomeCardType.name values).
-  Future<void> setHomeCardOrder(List<String> order) {
-    // Copied now: the change may wait for the load, and the caller's list
-    // may change by then.
-    final copy = List<String>.unmodifiable(order);
-    return _update((s) => s.copyWith(homeCardOrder: copy));
+  /// Persist the whole Home panel layout (HomePanelType.name values).
+  /// [order] holds every panel; [hidden] the ones switched off.
+  Future<void> setHomePanelLayout({
+    required List<String> order,
+    required Set<String> hidden,
+  }) {
+    // Copied now: the change may wait for the load.
+    final orderCopy = List<String>.unmodifiable(order);
+    final hiddenCopy = Set<String>.unmodifiable(hidden);
+    return _update(
+      (s) =>
+          s.copyWith(homePanelOrder: orderCopy, hiddenHomePanels: hiddenCopy),
+    );
   }
 
-  /// Restore the default home card order and visibility.
-  Future<void> resetHomeCards() => _update(
-    (s) => s.copyWith(
-      homeCardOrder: const <String>[],
-      hiddenHomeCards: const <String>{},
-    ),
-  );
+  /// Persist the key number tiles switched off (HomeKeyNumber.name values).
+  Future<void> setHiddenHomeKeyNumbers(Set<String> hidden) {
+    final copy = Set<String>.unmodifiable(hidden);
+    return _update((s) => s.copyWith(hiddenHomeKeyNumbers: copy));
+  }
 
   Future<void> setSafetyRuleEnabled(SafetyRuleId rule, bool enabled) => _update(
     (s) => s.copyWith(
@@ -3230,6 +3316,15 @@ class SettingsNotifier extends StateNotifier<AppSettings> {
 
   Future<void> setDefaultShowBuoyancy(bool value) =>
       _update((s) => s.copyWith(defaultShowBuoyancy: value));
+
+  Future<void> setDefaultShowAveloBuoyancy(bool value) =>
+      _update((s) => s.copyWith(defaultShowAveloBuoyancy: value));
+
+  Future<void> setDefaultShowAveloGasRemaining(bool value) =>
+      _update((s) => s.copyWith(defaultShowAveloGasRemaining: value));
+
+  Future<void> setDefaultShowComputerRmv(bool value) =>
+      _update((s) => s.copyWith(defaultShowComputerRmv: value));
 
   Future<void> setDefaultShowEstimatedTankPressure(bool value) =>
       _update((s) => s.copyWith(defaultShowEstimatedTankPressure: value));

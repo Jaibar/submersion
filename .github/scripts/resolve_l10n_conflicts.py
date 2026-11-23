@@ -26,8 +26,15 @@ def git(*args):
     return subprocess.run(["git", *args], capture_output=True, check=True).stdout.decode("utf-8")
 
 
-def show(ref, path):
-    return git("show", f"{ref}:{path}")
+def show_json(ref, path):
+    """The ARB at [ref], or an empty one when that ref has no such file: a
+    locale upstream has just added (app_ja.arb) exists in neither HEAD nor the
+    merge base."""
+    try:
+        text = git("show", f"{ref}:{path}")
+    except subprocess.CalledProcessError:
+        return OrderedDict()
+    return json.loads(text, object_pairs_hook=OrderedDict)
 
 
 conflicted = git("diff", "--name-only", "--diff-filter=U").split()
@@ -41,9 +48,9 @@ if others:
 base_ref = git("merge-base", "HEAD", "upstream/main").strip()
 for path in sorted(glob.glob("lib/l10n/arb/app_??.arb")):
     path = path.replace("\\", "/")
-    up = json.loads(show("upstream/main", path), object_pairs_hook=OrderedDict)
-    mine = json.loads(show("HEAD", path), object_pairs_hook=OrderedDict)
-    base = json.loads(show(base_ref, path), object_pairs_hook=OrderedDict)
+    up = show_json("upstream/main", path)
+    mine = show_json("HEAD", path)
+    base = show_json(base_ref, path)
     added = [k for k in mine if k not in base and k not in up]
     for k in added:
         up[k] = mine[k]

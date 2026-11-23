@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -16,6 +18,7 @@ import 'package:submersion/shared/widgets/record_editing/record_edit_host.dart';
 import 'package:submersion/shared/widgets/record_editing/record_sitting_refusal.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_pane_header.dart';
 import 'package:submersion/shared/widgets/record_editing/record_edit_shortcuts.dart';
+import 'package:submersion/shared/widgets/record_editing/record_open_unlocked.dart';
 
 /// A record small enough to show what the host does for any record page.
 @immutable
@@ -48,6 +51,8 @@ final _textCard = EditCard<_Note>(
   id: 'text',
   title: (_) => 'Text',
   isEmpty: (_) => false,
+  // 'bad' stands for input the card refuses at Save.
+  isValid: (session) => session.valueOf(_textField) != 'bad',
   editorBuilder: (context, session) => TextFormField(
     key: const ValueKey('textEditor'),
     initialValue: session.valueOf(_textField),
@@ -64,6 +69,14 @@ class _Probe {
   final saves = <Set<String>>[];
   bool failSave = false;
   Object? refuseWith;
+
+  /// How often the page's beforeSave was asked, and, while set, the answer
+  /// it is still waiting for.
+  int beforeSaveAsked = 0;
+  Completer<bool>? holdBeforeSave;
+
+  /// While set and not completed, the page's save is still being written.
+  Completer<void>? holdSave;
 }
 
 final _probeProvider = Provider<_Probe>((ref) => throw UnimplementedError());
@@ -77,22 +90,42 @@ class _NotePage extends ConsumerStatefulWidget {
     required this.noteId,
     this.embedded = false,
     this.offersEditing = true,
-    this.hostsEditing = true,
     this.stripEntry = false,
+    this.openUnlocked = false,
+    this.onSittingEnded,
+    this.saveLabel,
+    this.allowSave = true,
   });
 
   final String noteId;
+  final String? saveLabel;
+  final bool allowSave;
   final bool embedded;
   final bool offersEditing;
-  final bool hostsEditing;
   final bool stripEntry;
+  final bool openUnlocked;
+  final VoidCallback? onSittingEnded;
 
   @override
   ConsumerState<_NotePage> createState() => _NotePageState();
 }
 
 class _NotePageState extends ConsumerState<_NotePage>
-    with RecordEditHost<_NotePage, _Note> {
+    with
+        RecordEditHost<_NotePage, _Note>,
+        RecordOpenUnlocked<_NotePage, _Note> {
+  @override
+  bool openUnlockedOf(_NotePage widget) => widget.openUnlocked;
+
+  @override
+  VoidCallback? get onOpenedSittingEnded => widget.onSittingEnded;
+
+  @override
+  void onEditChanged() {
+    noteOpenedSittingEnded();
+    super.onEditChanged();
+  }
+
   @override
   String get hostRecordId => widget.noteId;
 
@@ -101,9 +134,6 @@ class _NotePageState extends ConsumerState<_NotePage>
 
   @override
   bool get offersEditing => widget.offersEditing;
-
-  @override
-  bool get hostsEditing => widget.hostsEditing;
 
   @override
   Iterable<EditCard<_Note>> get hostEditCards => [_textCard];
@@ -115,6 +145,7 @@ class _NotePageState extends ConsumerState<_NotePage>
   Future<void> saveSitting(EditSession<_Note> session) async {
     final probe = ref.read(_probeProvider);
     probe.saves.add(session.changedCardIds);
+    await probe.holdSave?.future;
     if (probe.failSave) throw StateError('the save failed');
     if (probe.refuseWith case final refusal?) throw refusal;
     justSavedRecord = session.working;
@@ -126,6 +157,18 @@ class _NotePageState extends ConsumerState<_NotePage>
 
   @override
   String editingTitle(_Note record) => 'Editing ${record.title}';
+
+  @override
+  String? get saveLabel => widget.saveLabel;
+
+  @override
+  Future<bool> beforeSave() async {
+    final probe = ref.read(_probeProvider);
+    probe.beforeSaveAsked++;
+    final hold = probe.holdBeforeSave;
+    if (hold != null) return hold.future;
+    return widget.allowSave;
+  }
 
   @override
   List<AddStripEntry> addStripEntries(_Note working) => [
@@ -143,6 +186,7 @@ class _NotePageState extends ConsumerState<_NotePage>
     followStored(_noteProvider(widget.noteId));
     final stored = ref.watch(_noteProvider(widget.noteId)).value;
     if (stored == null) return const SizedBox.shrink();
+    openUnlockedOnce(stored);
     final shown = shownRecord(stored);
     final content = ListView(
       children: [
@@ -158,12 +202,6 @@ class _NotePageState extends ConsumerState<_NotePage>
         ),
       ],
     );
-    if (!hostsEditing) {
-      return Scaffold(
-        appBar: AppBar(title: Text(shown.title)),
-        body: content,
-      );
-    }
     if (widget.embedded) {
       final header = isSittingOpen
           ? editingPaneRow(shown, menu: const SizedBox.shrink())
@@ -367,6 +405,245 @@ void main() {
     expect(find.byType(RecordEditBar), findsNothing);
   });
 
+  // A sitting that ends otherwise (a reader's Send, issue #4527, phase 2)
+  // names its Save, and may stop before it.
+  group('save label and the check before Save', () {
+    testWidgets('the host\'s save label reaches the bar', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', saveLabel: 'Send'));
+      await unlock(tester);
+
+      expect(find.text('Send'), findsOneWidget);
+      expect(find.text(l.forms_save), findsNothing);
+    });
+
+    testWidgets('a beforeSave that answers false saves nothing and keeps the '
+        'sitting', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', allowSave: false));
+      await unlock(tester);
+      await editText(tester, 'Choppy');
+
+      await tester.tap(find.text(l.forms_save));
+      await tester.pumpAndSettle();
+
+      expect(probe.saves, isEmpty);
+      expect(find.byType(RecordEditBar), findsOneWidget);
+    });
+
+    testWidgets('a beforeSave that answers true saves', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1'));
+      await unlock(tester);
+      await editText(tester, 'Choppy');
+
+      await tester.tap(find.text(l.forms_save));
+      await tester.pumpAndSettle();
+
+      expect(probe.saves, hasLength(1));
+    });
+
+    // A double tap, or the Save key pressed twice, while the check is still
+    // reading what it needs.
+    testWidgets('a second Save while beforeSave is asked asks once', (
+      tester,
+    ) async {
+      await pump(tester, const _NotePage(noteId: 'n1'));
+      await unlock(tester);
+      await editText(tester, 'Choppy');
+      final hold = probe.holdBeforeSave = Completer<bool>();
+
+      await tester.tap(find.text(l.forms_save));
+      await tester.pump();
+      await tester.tap(find.text(l.forms_save));
+      await tester.pump();
+      hold.complete(true);
+      await tester.pumpAndSettle();
+
+      expect(probe.beforeSaveAsked, 1);
+      expect(probe.saves, hasLength(1));
+    });
+
+    testWidgets('input to fix is refused before beforeSave is asked', (
+      tester,
+    ) async {
+      await pump(tester, const _NotePage(noteId: 'n1'));
+      await unlock(tester);
+      await editText(tester, 'bad');
+
+      await tester.tap(find.text(l.forms_save));
+      await tester.pumpAndSettle();
+
+      expect(probe.beforeSaveAsked, 0);
+      expect(probe.saves, isEmpty);
+      expect(find.text(l.recordEdit_fixInvalid), findsOneWidget);
+    });
+
+    testWidgets('a Save while the sitting is being written asks nothing', (
+      tester,
+    ) async {
+      await pump(tester, const _NotePage(noteId: 'n1'));
+      await unlock(tester);
+      await editText(tester, 'Choppy');
+      final writing = probe.holdSave = Completer<void>();
+      await tester.tap(find.text(l.forms_save));
+      await tester.pump();
+
+      unawaited(
+        tester.state<_NotePageState>(find.byType(_NotePage)).saveAndReport(),
+      );
+      await tester.pump();
+      writing.complete();
+      await tester.pumpAndSettle();
+
+      expect(probe.beforeSaveAsked, 1);
+      expect(probe.saves, hasLength(1));
+    });
+
+    testWidgets('a sitting with nothing changed ends without beforeSave', (
+      tester,
+    ) async {
+      await pump(tester, const _NotePage(noteId: 'n1'));
+      await unlock(tester);
+
+      await tester
+          .state<_NotePageState>(find.byType(_NotePage))
+          .saveAndReport();
+      await tester.pumpAndSettle();
+
+      expect(probe.beforeSaveAsked, 0);
+      expect(find.byType(RecordEditBar), findsNothing);
+    });
+  });
+
+  // A page asked to open unlocked (an old edit address, a pane's
+  // `&mode=edit`) does so once, and tells its owner when that sitting ends.
+  group('opened unlocked', () {
+    testWidgets('the page unlocks once', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', openUnlocked: true));
+      expect(find.byType(RecordEditBar), findsOneWidget);
+
+      await tester.tap(find.text(l.forms_cancel));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsNothing);
+
+      // A rebuild with the same request does not unlock again.
+      tester
+          .state<_HostState>(find.byType(_Host))
+          .show(const _NotePage(noteId: 'n1', openUnlocked: true));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsNothing);
+    });
+
+    testWidgets('the end of the sitting it opened is told once', (
+      tester,
+    ) async {
+      var ended = 0;
+      await pump(
+        tester,
+        _NotePage(
+          noteId: 'n1',
+          openUnlocked: true,
+          onSittingEnded: () => ended++,
+        ),
+      );
+
+      await tester.tap(find.text(l.forms_cancel));
+      await tester.pumpAndSettle();
+      expect(ended, 1);
+
+      await unlock(tester);
+      await tester.tap(find.text(l.forms_cancel));
+      await tester.pumpAndSettle();
+      expect(ended, 1);
+    });
+
+    testWidgets('turned off with nothing changed, it locks', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', openUnlocked: true));
+      expect(find.byType(RecordEditBar), findsOneWidget);
+
+      tester
+          .state<_HostState>(find.byType(_Host))
+          .show(const _NotePage(noteId: 'n1'));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsNothing);
+    });
+
+    // Android's Back strips `mode=edit` from the same page: typing the
+    // diver has done keeps the sitting open.
+    testWidgets('turned off with changes, it stays unlocked', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', openUnlocked: true));
+      await editText(tester, 'Choppy');
+
+      tester
+          .state<_HostState>(find.byType(_Host))
+          .show(const _NotePage(noteId: 'n1'));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsOneWidget);
+      expect(find.text('Choppy'), findsOneWidget);
+    });
+
+    testWidgets('turned on again, it opens unlocked again', (tester) async {
+      await pump(tester, const _NotePage(noteId: 'n1', openUnlocked: true));
+      await tester.tap(find.text(l.forms_cancel));
+      await tester.pumpAndSettle();
+      final host = tester.state<_HostState>(find.byType(_Host));
+      host.show(const _NotePage(noteId: 'n1'));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsNothing);
+
+      host.show(const _NotePage(noteId: 'n1', openUnlocked: true));
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsOneWidget);
+    });
+
+    // The unlock comes after the frame: a record that is not the page's
+    // own by then (a stale read, another record handed to the page) is not
+    // opened, and the page's own opens once it has it.
+    testWidgets('a record not the page\'s own is not opened', (tester) async {
+      probe = _Probe();
+      probe.notes['n2'] = const _Note('n1', 'First', 'Calm');
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [_probeProvider.overrideWithValue(probe)],
+          child: const MaterialApp(
+            locale: Locale('en'),
+            localizationsDelegates: AppLocalizations.localizationsDelegates,
+            supportedLocales: AppLocalizations.supportedLocales,
+            home: _Host(page: _NotePage(noteId: 'n2', openUnlocked: true)),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(RecordEditBar), findsNothing);
+
+      probe.notes['n2'] = const _Note('n2', 'Second', 'Flat');
+      ProviderScope.containerOf(
+        tester.element(find.byType(_Host)),
+      ).invalidate(_noteProvider('n2'));
+      await tester.pumpAndSettle();
+      expect(find.text('Editing Second'), findsOneWidget);
+    });
+
+    testWidgets('a leave the app asked about is not told', (tester) async {
+      var ended = 0;
+      await pump(
+        tester,
+        _NotePage(
+          noteId: 'n1',
+          openUnlocked: true,
+          onSittingEnded: () => ended++,
+        ),
+      );
+      await editText(tester, 'Choppy');
+
+      final leaving = container.read(appExitGuardProvider).mayLeave();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(l.forms_discard_discard));
+      await tester.pumpAndSettle();
+
+      expect(await leaving, isTrue);
+      expect(ended, 0);
+    });
+  });
+
   testWidgets('the pane uses the pane header', (tester) async {
     await pump(tester, const _NotePage(noteId: 'n1', embedded: true));
     await unlock(tester);
@@ -391,16 +668,6 @@ void main() {
     target!.unlock();
     await tester.pumpAndSettle();
     expect(find.byType(RecordEditBar), findsOneWidget);
-  });
-
-  testWidgets('a page that never hosts editing builds no sitting', (
-    tester,
-  ) async {
-    await pump(tester, const _NotePage(noteId: 'n1', hostsEditing: false));
-
-    final state = tester.state<_NotePageState>(find.byType(_NotePage));
-    expect(state.maybeEditController, isNull);
-    expect(container.read(recordEditShortcutTargetsProvider).current, isNull);
   });
 
   testWidgets('a page that offers no editing takes no keys', (tester) async {

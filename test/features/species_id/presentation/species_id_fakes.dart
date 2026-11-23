@@ -50,10 +50,21 @@ class RecordingIdentificationService extends MediaIdentificationService {
   var requestsWait = false;
   final _waiting = <String>{};
 
+  /// How each request was asked: by hand, and fresh (issue #4825).
+  final byHand = <bool>[];
+  final fresh = <bool>[];
+
   @override
-  Future<void> request(MediaItem item, {GeoPoint? location}) async {
+  Future<void> request(
+    MediaItem item, {
+    GeoPoint? location,
+    bool byHand = false,
+    bool fresh = false,
+  }) async {
     requested.add(item.id);
     locations.add(location);
+    this.byHand.add(byHand);
+    this.fresh.add(fresh);
     if (requestsWait) _waiting.add(item.id);
   }
 
@@ -74,6 +85,19 @@ class RecordingIdentificationService extends MediaIdentificationService {
 
   @override
   Future<void> reconcile(String mediaId) async => reconciled.add(mediaId);
+
+  /// Playhead reports, in order (issue #4709).
+  final followed = <({String mediaId, int ms, bool seek})>[];
+
+  @override
+  void followPlayhead(String mediaId, int positionMs, {required bool seek}) =>
+      followed.add((mediaId: mediaId, ms: positionMs, seek: seek));
+
+  /// Videos whose playhead report was forgotten, in order.
+  final forgotten = <String>[];
+
+  @override
+  void forgetPlayhead(String mediaId) => forgotten.add(mediaId);
 
   @override
   Future<void> reject(String mediaId, List<String> identificationIds) async =>

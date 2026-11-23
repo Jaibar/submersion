@@ -34,10 +34,17 @@ void main() {
       expect(kind(t, playing: false), TrackLabelKind.confident);
     });
 
-    test('a suggestion under the confident bar has a pill only paused', () {
+    test('a suggestion under the confident bar has a pill, playing or '
+        'paused (issue #4709)', () {
       final t = track('a', confident: false);
-      expect(kind(t, playing: true), isNull);
+      expect(kind(t, playing: true), TrackLabelKind.suggestion);
       expect(kind(t, playing: false), TrackLabelKind.suggestion);
+    });
+
+    test('a dot is still paused only', () {
+      final t = track('a', suggestable: false, confident: false);
+      expect(kind(t, playing: true), isNull);
+      expect(kind(t, playing: false), TrackLabelKind.dot);
     });
 
     test('an unnamed fish has a dot only paused', () {
@@ -144,7 +151,7 @@ void main() {
       expect(labels.first.box.x, closeTo(0.12, 1e-9));
     });
 
-    test('keeps at most six, largest first', () {
+    test('labels every fish, however many, largest first', () {
       final tracks = [
         for (var k = 0; k < 8; k++)
           track('t$k').copyWith(
@@ -164,9 +171,9 @@ void main() {
           ),
       ];
       final labels = labelsAt(tracks, 1500, playing: true);
-      expect(labels, hasLength(6));
+      expect(labels, hasLength(8));
       expect(labels.first.identificationId, 't7');
-      expect(labels.last.identificationId, 't2');
+      expect(labels.last.identificationId, 't0');
     });
 
     test('two tracks on the same fish draw one label, the diver\'s first', () {

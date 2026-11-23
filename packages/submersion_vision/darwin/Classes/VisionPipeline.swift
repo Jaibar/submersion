@@ -2,8 +2,8 @@ import CoreGraphics
 import CoreML
 import Foundation
 import ImageIO
-// Imported only where it exists, so the accuracy tool in
-// tool/species_pack/vision_cli can compile this file on its own.
+// Imported only where it exists, so the accuracy tool in vision_cli/ of
+// submersion-app/species-pack can compile this file on its own.
 #if canImport(Flutter)
 import Flutter
 #elseif canImport(FlutterMacOS)
@@ -121,6 +121,12 @@ struct VisionModelSettings: Equatable {
   /// At most this many boxes once two detectors' boxes are merged.
   let maxBoxes: Int
   let cropPadding: Double
+  /// A video moment's box under [smallBoxSide] pixels on its shorter side
+  /// is cropped with this padding, or [cropPadding] when that is larger
+  /// (issue #4882).
+  let smallBoxPadding: Double
+  /// 0 crops every video moment at [cropPadding].
+  let smallBoxSide: Double
   let classifierPath: String
   let classifierInputSize: Int
   let classifierMean: [Float]
@@ -139,6 +145,9 @@ struct VisionModelSettings: Equatable {
     guard mergeIoU > 0, mergeIoU <= 1 else { throw VisionError.badArguments("mergeIoU") }
     maxBoxes = try args.int("maxBoxes")
     cropPadding = try args.double("cropPadding")
+    // Absent, as from a tool that predates them, means no wider crop.
+    smallBoxPadding = try VisionModelSettings.nonNegative(values, "smallBoxPadding") ?? cropPadding
+    smallBoxSide = try VisionModelSettings.nonNegative(values, "smallBoxSide") ?? 0
     classifierPath = try args.string("classifierPath")
     classifierInputSize = try args.int("classifierInputSize")
     classifierMean = try args.triple("classifierMean")
@@ -154,6 +163,16 @@ struct VisionModelSettings: Equatable {
     } else {
       cropFit = .padSquare
     }
+  }
+
+  /// [key] of [values]: nil when absent, else a finite number of 0 or
+  /// more; anything else fails as bad arguments.
+  private static func nonNegative(_ values: [String: Any], _ key: String) throws -> Double? {
+    guard let value = values[key] else { return nil }
+    guard let number = value as? NSNumber, number.doubleValue >= 0, number.doubleValue.isFinite else {
+      throw VisionError.badArguments(key)
+    }
+    return number.doubleValue
   }
 }
 
@@ -251,15 +270,23 @@ final class VisionPipeline {
 
   /// The box at normalised [x, y, w, h] of [image], padded, cropped and
   /// embedded: `{pixelWidth, pixelHeight, crop, embedding}`, or nil when
-  /// the crop is too small to read. Shared by photos and video moments.
-  func cropAndEmbed(_ image: CGImage, x: Double, y: Double, w: Double, h: Double) throws -> [String: Any]? {
+  /// the crop is too small to read. Shared by photos and video moments: a
+  /// [moment]'s box under `smallBoxSide` pixels on its shorter side takes
+  /// `smallBoxPadding`, or `cropPadding` when that is larger (issue #4882);
+  /// every other box takes `cropPadding`.
+  func cropAndEmbed(
+    _ image: CGImage, x: Double, y: Double, w: Double, h: Double, moment: Bool = false
+  ) throws -> [String: Any]? {
     guard let settings = settings, let classifier = classifier else { throw VisionError.notLoaded }
     let width = image.width
     let height = image.height
     // Pixel box of the detection, then padded for the crop.
     let bx = x * Double(width), by = y * Double(height)
     let bw = w * Double(width), bh = h * Double(height)
-    let padX = bw * settings.cropPadding, padY = bh * settings.cropPadding
+    // A small box is never cropped tighter than the pack's padding.
+    let padding = moment && min(bw, bh) < settings.smallBoxSide
+      ? max(settings.smallBoxPadding, settings.cropPadding) : settings.cropPadding
+    let padX = bw * padding, padY = bh * padding
     let cropRect = CGRect(
       x: max(0, bx - padX), y: max(0, by - padY),
       width: min(Double(width), bx + bw + padX) - max(0, bx - padX),
@@ -271,7 +298,8 @@ final class VisionPipeline {
     }
     let embedStart = Date()
     let embedding = try embed(crop, settings: settings, model: classifier)
-    // Read by the accuracy tool (tool/species_pack); the app ignores it.
+    // Read by the accuracy tool (submersion-app/species-pack); the app
+    // ignores it.
     let embedMs = Date().timeIntervalSince(embedStart) * 1000
     return [
       "pixelWidth": Int(bw.rounded()), "pixelHeight": Int(bh.rounded()),
@@ -289,10 +317,10 @@ final class VisionPipeline {
   }
 
   /// Several detectors' boxes as one set, as the accuracy scorer merged
-  /// them (tool/species_pack/boxes.py `merge`): all boxes pooled in run
-  /// order, best score first (equal scores keep pool order, as Python's
-  /// stable sort does), each dropped if it overlaps a kept box by [iou] or
-  /// more, at most [limit].
+  /// them (boxes.py `merge` in submersion-app/species-pack): all boxes
+  /// pooled in run order, best score first (equal scores keep pool order,
+  /// as Python's stable sort does), each dropped if it overlaps a kept box
+  /// by [iou] or more, at most [limit].
   static func merge(_ runs: [[Box]], iou: Double, limit: Int) -> [Box] {
     let pooled = runs.flatMap { $0 }
     let order = pooled.indices.sorted { a, b in

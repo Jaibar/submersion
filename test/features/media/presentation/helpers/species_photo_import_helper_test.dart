@@ -1,63 +1,95 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:submersion/features/marine_life/data/repositories/species_repository.dart';
 import 'package:submersion/features/media/data/repositories/media_repository.dart';
-import 'package:submersion/features/media/data/repositories/media_species_repository.dart';
-import 'package:submersion/features/media/data/services/species_tagging_service.dart';
-import 'package:submersion/features/media/domain/entities/import_candidate.dart';
+import 'package:submersion/features/media/data/services/network_credentials_service.dart';
+import 'package:submersion/features/media/data/services/network_fetch_pipeline.dart';
+import 'package:submersion/features/media/data/services/photo_picker_service.dart';
 import 'package:submersion/features/media/presentation/helpers/species_photo_import_helper.dart';
+import 'package:submersion/features/media/presentation/pages/photo_picker_page.dart';
+import 'package:submersion/features/media/presentation/providers/photo_picker_providers.dart';
+import 'package:submersion/features/media/presentation/providers/url_tab_providers.dart';
+import 'package:submersion/l10n/arb/app_localizations.dart';
 
-import '../../../../helpers/test_database.dart';
-import '../../data/repositories/species_photo_fixtures.dart';
+/// A gallery with nothing in it, granted.
+class _EmptyGallery implements PhotoPickerService {
+  @override
+  bool get supportsGalleryBrowsing => true;
 
+  @override
+  Future<PhotoPermissionStatus> checkPermission() async =>
+      PhotoPermissionStatus.authorized;
+
+  @override
+  Future<PhotoPermissionStatus> requestPermission() async =>
+      PhotoPermissionStatus.authorized;
+
+  @override
+  Future<List<AssetInfo>> getAssetsInDateRange(
+    DateTime start,
+    DateTime end,
+  ) async => const [];
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _NoPipeline implements NetworkFetchPipeline {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _NoCredentials implements NetworkCredentialsService {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+class _NoRepository implements MediaRepository {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// A species page's Add photos (issue #4527, media library decision 5).
 void main() {
-  late SpeciesTaggingService service;
-  late MediaSpeciesRepository tags;
-
-  setUp(() async {
-    await setUpTestDatabase();
-    tags = MediaSpeciesRepository();
-    service = SpeciesTaggingService(
-      tags: tags,
-      media: MediaRepository(),
-      species: SpeciesRepository(),
+  testWidgets('opens the picker with its Gallery tab only', (tester) async {
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          photoPickerServiceProvider.overrideWithValue(_EmptyGallery()),
+          // The picker clears the URL tab's staging as it opens; no
+          // database behind it here.
+          urlTabNotifierProvider.overrideWith(
+            (ref) => UrlTabNotifier(
+              pipeline: _NoPipeline(),
+              credentials: _NoCredentials(),
+              mediaRepository: _NoRepository(),
+            ),
+          ),
+        ],
+        child: MaterialApp(
+          locale: const Locale('en'),
+          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          supportedLocales: AppLocalizations.supportedLocales,
+          home: Consumer(
+            builder: (context, ref, _) => Scaffold(
+              body: TextButton(
+                onPressed: () =>
+                    SpeciesPhotoImportHelper.preparePhotosForSpecies(
+                      context,
+                      ref,
+                      speciesId: 'sp',
+                    ),
+                child: const Text('Add photos'),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
-    await insertTestDive(id: 'd1', at: DateTime(2024, 1, 10));
-    await insertTestSpecies(id: 'sp_whale_shark', name: 'Whale Shark');
-    await insertTestMedia(id: 'p1', diveId: 'd1');
-    await insertTestMedia(id: 'p2', diveId: 'd1');
-  });
+    await tester.tap(find.text('Add photos'));
+    await tester.pumpAndSettle();
 
-  tearDown(() async {
-    await tearDownTestDatabase();
-  });
-
-  test(
-    'tags every imported row and folds the counts into one outcome',
-    () async {
-      const review = ImportReviewResult(
-        linked: 2,
-        skipped: 1,
-        failures: {'asset-x': 'no dive'},
-        importedIds: ['p1', 'p2', 'gone'],
-      );
-
-      final outcome = await SpeciesPhotoImportHelper.tagImported(
-        review: review,
-        service: service,
-        speciesId: 'sp_whale_shark',
-      );
-
-      expect(outcome.added, 2);
-      expect(outcome.skipped, 1);
-      // One import failure plus one tag failure (the row that does not exist).
-      expect(outcome.failed, 2);
-      expect(await tags.getTagsForMedia('p1'), hasLength(1));
-      expect(await tags.getTagsForMedia('p2'), hasLength(1));
-    },
-  );
-
-  test('ImportReviewResult defaults to no imported ids', () {
-    const review = ImportReviewResult(linked: 0, skipped: 0);
-    expect(review.importedIds, isEmpty);
+    final picker = tester.widget<PhotoPickerPage>(find.byType(PhotoPickerPage));
+    expect(picker.galleryOnly, isTrue);
   });
 }
